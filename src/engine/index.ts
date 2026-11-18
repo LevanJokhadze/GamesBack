@@ -10,3 +10,4 @@ export function applyAction(s: GameState, seat: number, a: BotAction): GameState
   if (a.t === "bid") return placeBid(s, seat, a.bid);
   return playCard(s, seat, a.cardId, a.joker);
 }
+export * from "./elo";
