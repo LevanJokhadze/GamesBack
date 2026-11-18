@@ -151,11 +151,41 @@ const server = createServer((req, res) => {
   });
 });
 
+// Voice chat relay (TURN) for players whose networks block direct connections.
+// Cloudflare Realtime TURN: set CF_TURN_KEY_ID and CF_TURN_API_TOKEN. Or a fixed server:
+// TURN_URLS (comma-separated), TURN_USERNAME, TURN_CREDENTIAL.
+let iceCache: { at: number; servers: unknown[] } | null = null;
+async function iceServers(): Promise<unknown[]> {
+  const env = process.env;
+  if (iceCache && Date.now() - iceCache.at < (iceCache.servers.length ? 30 * 60_000 : 60_000)) return iceCache.servers;
+  let servers: unknown[] = [];
+  if (env.CF_TURN_KEY_ID && env.CF_TURN_API_TOKEN) {
+    try {
+      const r = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${env.CF_TURN_KEY_ID}/credentials/generate-ice-servers`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.CF_TURN_API_TOKEN}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ ttl: 4 * 3600 }),
+      });
+      if (r.ok) servers = ((await r.json()) as { iceServers?: unknown[] }).iceServers ?? [];
+      else console.error("turn credentials failed", r.status);
+    } catch (e) {
+      console.error("turn credentials failed", e);
+    }
+  } else if (env.TURN_URLS) {
+    servers = [{ urls: env.TURN_URLS.split(","), username: env.TURN_USERNAME, credential: env.TURN_CREDENTIAL }];
+  }
+  iceCache = { at: Date.now(), servers };
+  return servers;
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://x");
   if (req.method === "OPTIONS") return send(req, res, 204, null);
   if (url.pathname === "/" || url.pathname === "/api/health") {
     return send(req, res, 200, { ok: true, service: "joker-backend", rooms: rooms.size });
+  }
+  if (url.pathname === "/api/ice" && req.method === "GET") {
+    return send(req, res, 200, { iceServers: await iceServers() });
   }
   if (url.pathname === "/api/rooms" && req.method === "POST") {
     if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
