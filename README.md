@@ -1,9 +1,12 @@
 # GamesBack — Joker game server
 
 Backend for **Joker** (ჯოკერი), the Georgian four-player trick-taking card game.
-It runs on **Cloudflare Workers**: one Worker for the small HTTP API and one
-**Durable Object per game room**, which holds the game state and the players'
-WebSocket connections. The server is authoritative; clients only send intents.
+The server is authoritative; clients only send intents. All room logic lives in
+`src/room-core.ts` and runs on two hosts with the same API:
+
+- **Cloudflare Workers** (`src/index.ts`, `src/room.ts`): one Durable Object per game room.
+- **Node** (`src/node-server.ts`, `npm start`): for Railway or any Node host. Rooms are kept in
+  memory, so a restart or redeploy ends games in progress.
 
 Frontend: [LevanJokhadze/Games](https://github.com/LevanJokhadze/Games).
 
@@ -36,6 +39,7 @@ House rules vary a lot between families and apps; these are easy to change in `s
 ```bash
 npm install
 npm run dev        # wrangler dev on http://localhost:8787
+npm run dev:node   # the Node server on http://localhost:8787
 npm test           # engine tests (vitest)
 npm run typecheck
 npm run simulate   # play 200 bot-only games and print bot accuracy
@@ -55,6 +59,16 @@ WebSocket messages from the client (JSON): `hello {playerId, name}` (send first)
 `trump {suit|null}`, `bid {bid}`, `play {cardId, joker?: {type: "high"|"low", suit?}}`,
 `chat {text}`, `rematch`, `ping`.
 The server answers with `state {room}` (a per-player view, own cards only) or `error {message}`.
+
+## Deploy to Railway (Node)
+
+The service runs `npm start` (Railpack detects it). Settings:
+
+- Variables: `ALLOWED_ORIGINS` = your frontend origin(s), comma-separated (or `*`). Railway sets `PORT`.
+- Healthcheck path: `/api/health`.
+- Generate a domain (Settings → Networking) or attach your subdomain, and use that URL as the
+  frontend's `VITE_API_URL`.
+- Keep one replica: rooms are in memory, so several replicas would not share games.
 
 ## Deploy to Cloudflare
 
