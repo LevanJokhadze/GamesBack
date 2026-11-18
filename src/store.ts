@@ -32,6 +32,29 @@ export interface GameRecord {
   place: number;
   ratingBefore: number;
   ratingAfter: number;
+  /** Everyone at the table, by seat. */
+  players: { name: string; userId: string | null; score: number; place: number }[];
+}
+
+export interface MatchPlayer {
+  seat: number;
+  name: string;
+  userId: string | null;
+  bot: boolean;
+  avatarUrl: string | null;
+  score: number;
+  place: number;
+  ratingBefore: number | null;
+  ratingAfter: number | null;
+}
+
+export interface Match {
+  id: string;
+  finishedAt: string;
+  mode: string;
+  khishti: number;
+  players: MatchPlayer[];
+  pulkas: unknown[];
 }
 
 export class InputError extends Error {}
@@ -60,8 +83,10 @@ export interface Store {
   updateProfile(id: string, p: ProfilePatch): Promise<User>;
   avatar(id: string): Promise<Avatar | null>;
   leaderboard(limit: number): Promise<(User & { rank: number })[]>;
-  recentGames(id: string, limit: number): Promise<GameRecord[]>;
-  rateGame(game: FinishedGame): Promise<(RatingChange | null)[]>;
+  /** Games of a player, newest first; `before` is an ISO time for paging. */
+  recentGames(id: string, limit: number, before?: string): Promise<GameRecord[]>;
+  match(id: string): Promise<Match | null>;
+  rateGame(game: FinishedGame): Promise<{ matchId: string; changes: (RatingChange | null)[] }>;
 }
 
 // ---------- validation helpers ----------
@@ -124,7 +149,7 @@ function computeChanges(game: FinishedGame, users: Map<string, User>): (RatingCh
 
 export class MemoryStore implements Store {
   private users = new Map<string, User & { tokenHash: string; avatar: Avatar }>();
-  private games: { id: string; finishedAt: string; mode: string; userIds: (string | null)[]; totals: number[]; changes: (RatingChange | null)[] }[] = [];
+  private games: { id: string; finishedAt: string; game: FinishedGame; changes: (RatingChange | null)[] }[] = [];
 
   async init() {}
 
@@ -198,23 +223,53 @@ export class MemoryStore implements Store {
       .map((u, i) => ({ ...this.pub(u), rank: i + 1 }));
   }
 
-  async recentGames(id: string, limit: number) {
+  async recentGames(id: string, limit: number, before?: string) {
     return this.games
-      .filter((g) => g.userIds.includes(id))
-      .slice(-limit)
+      .filter((g) => g.game.userIds.includes(id) && (!before || g.finishedAt < before))
       .reverse()
+      .slice(0, limit)
       .map((g) => {
-        const i = g.userIds.indexOf(id);
+        const i = g.game.userIds.indexOf(id);
+        const pl = places(g.game.totals);
         return {
           id: g.id,
           finishedAt: g.finishedAt,
-          mode: g.mode,
-          score: g.totals[i],
-          place: places(g.totals)[i],
+          mode: g.game.mode,
+          score: g.game.totals[i],
+          place: pl[i],
           ratingBefore: g.changes[i]!.before,
           ratingAfter: g.changes[i]!.after,
+          players: g.game.names.map((name, s) => ({ name, userId: g.game.userIds[s], score: g.game.totals[s], place: pl[s] })),
         };
       });
+  }
+
+  async match(id: string) {
+    const g = this.games.find((x) => x.id === id);
+    if (!g) return null;
+    const pl = places(g.game.totals);
+    return {
+      id: g.id,
+      finishedAt: g.finishedAt,
+      mode: g.game.mode,
+      khishti: g.game.khishti,
+      pulkas: g.game.pulkas,
+      players: g.game.names.map((name, s) => {
+        const uid = g.game.userIds[s];
+        const u = uid ? this.users.get(uid) : undefined;
+        return {
+          seat: s,
+          name,
+          userId: uid,
+          bot: !uid,
+          avatarUrl: u ? `/api/users/${u.id}/avatar?v=${u.avatarVersion}` : null,
+          score: g.game.totals[s],
+          place: pl[s],
+          ratingBefore: g.changes[s]?.before ?? null,
+          ratingAfter: g.changes[s]?.after ?? null,
+        };
+      }),
+    };
   }
 
   async rateGame(game: FinishedGame) {
@@ -231,8 +286,9 @@ export class MemoryStore implements Store {
       if (pl[i] === 1) u.wins += 1;
       u.peak = Math.max(u.peak, c.after);
     });
-    this.games.push({ id: randomUUID(), finishedAt: new Date().toISOString(), mode: game.mode, userIds: game.userIds, totals: game.totals, changes });
-    return changes;
+    const matchId = randomUUID();
+    this.games.push({ id: matchId, finishedAt: new Date().toISOString(), game, changes });
+    return { matchId, changes };
   }
 }
 
@@ -262,12 +318,15 @@ CREATE TABLE IF NOT EXISTS games (
   room_code text NOT NULL,
   mode text NOT NULL,
   finished_at timestamptz NOT NULL DEFAULT now(),
-  totals int[] NOT NULL
+  totals int[] NOT NULL,
+  khishti int NOT NULL DEFAULT -200,
+  pulkas jsonb NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS game_players (
   game_id uuid NOT NULL REFERENCES games(id) ON DELETE CASCADE,
   seat int NOT NULL,
   user_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  name text NOT NULL DEFAULT '',
   score int NOT NULL,
   place int NOT NULL,
   rating_before int,
@@ -382,13 +441,16 @@ export class PgStore implements Store {
     return rows.map((r) => ({ ...rowToUser(r), rank: Number(r.rank) }));
   }
 
-  async recentGames(id: string, limit: number) {
+  async recentGames(id: string, limit: number, before?: string) {
     if (!UUID_RE.test(id)) return [];
     const { rows } = await this.pool.query(
-      `SELECT g.id, g.finished_at, g.mode, gp.score, gp.place, gp.rating_before, gp.rating_after
+      `SELECT g.id, g.finished_at, g.mode, gp.score, gp.place, gp.rating_before, gp.rating_after,
+              (SELECT json_agg(json_build_object('name', o.name, 'userId', o.user_id, 'score', o.score, 'place', o.place) ORDER BY o.seat)
+                 FROM game_players o WHERE o.game_id = g.id) AS players
        FROM game_players gp JOIN games g ON g.id = gp.game_id
-       WHERE gp.user_id = $1 ORDER BY g.finished_at DESC LIMIT $2`,
-      [id, limit],
+       WHERE gp.user_id = $1 AND ($3::timestamptz IS NULL OR g.finished_at < $3)
+       ORDER BY g.finished_at DESC LIMIT $2`,
+      [id, limit, before && !isNaN(Date.parse(before)) ? before : null],
     );
     return rows.map((r) => ({
       id: String(r.id),
@@ -398,7 +460,38 @@ export class PgStore implements Store {
       place: Number(r.place),
       ratingBefore: Number(r.rating_before),
       ratingAfter: Number(r.rating_after),
+      players: r.players ?? [],
     }));
+  }
+
+  async match(id: string) {
+    if (!UUID_RE.test(id)) return null;
+    const g = await this.pool.query(`SELECT id, finished_at, mode, khishti, pulkas FROM games WHERE id = $1`, [id]);
+    if (!g.rows[0]) return null;
+    const p = await this.pool.query(
+      `SELECT gp.seat, gp.name, gp.user_id, gp.score, gp.place, gp.rating_before, gp.rating_after, u.avatar_version
+       FROM game_players gp LEFT JOIN users u ON u.id = gp.user_id WHERE gp.game_id = $1 ORDER BY gp.seat`,
+      [id],
+    );
+    const r = g.rows[0];
+    return {
+      id: String(r.id),
+      finishedAt: new Date(r.finished_at).toISOString(),
+      mode: String(r.mode),
+      khishti: Number(r.khishti),
+      pulkas: r.pulkas ?? [],
+      players: p.rows.map((x) => ({
+        seat: Number(x.seat),
+        name: String(x.name),
+        userId: x.user_id ? String(x.user_id) : null,
+        bot: !x.user_id,
+        avatarUrl: x.user_id ? `/api/users/${x.user_id}/avatar?v=${x.avatar_version}` : null,
+        score: Number(x.score),
+        place: Number(x.place),
+        ratingBefore: x.rating_before === null ? null : Number(x.rating_before),
+        ratingAfter: x.rating_after === null ? null : Number(x.rating_after),
+      })),
+    };
   }
 
   async rateGame(game: FinishedGame) {
@@ -410,18 +503,17 @@ export class PgStore implements Store {
       const users = new Map(rows.map((r) => [String(r.id), rowToUser(r)]));
       const changes = computeChanges(game, users);
       const pl = places(game.totals);
-      const g = await client.query(`INSERT INTO games (room_code, mode, totals) VALUES ($1, $2, $3) RETURNING id`, [
-        game.code,
-        game.mode,
-        game.totals,
-      ]);
+      const g = await client.query(
+        `INSERT INTO games (room_code, mode, totals, khishti, pulkas) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [game.code, game.mode, game.totals, game.khishti, JSON.stringify(game.pulkas)],
+      );
       for (let i = 0; i < game.userIds.length; i++) {
         const c = changes[i];
         const uid = game.userIds[i] && users.has(game.userIds[i]!) ? game.userIds[i] : null;
         await client.query(
-          `INSERT INTO game_players (game_id, seat, user_id, score, place, rating_before, rating_after)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [g.rows[0].id, i, uid, game.totals[i], pl[i], c?.before ?? null, c?.after ?? null],
+          `INSERT INTO game_players (game_id, seat, user_id, name, score, place, rating_before, rating_after)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [g.rows[0].id, i, uid, game.names[i] ?? "", game.totals[i], pl[i], c?.before ?? null, c?.after ?? null],
         );
         if (uid && c) {
           await client.query(
@@ -431,7 +523,7 @@ export class PgStore implements Store {
         }
       }
       await client.query("COMMIT");
-      return changes;
+      return { matchId: String(g.rows[0].id), changes };
     } catch (e) {
       await client.query("ROLLBACK");
       throw e;

@@ -17,7 +17,11 @@ function suite(name: string, make: () => Store) {
       expect((await s.userByToken(a.token))?.id).toBe(a.user.id);
       expect(await s.userByToken("nope-nope-nope-nope-nope")).toBeNull();
 
-      const changes = await s.rateGame({ code: "ABCDE", mode: "standard", userIds: [a.user.id, null, b.user.id, null], totals: [900, 400, 100, -300] });
+      const { matchId, changes } = await s.rateGame({
+        code: "ABCDE", mode: "standard", khishti: -200,
+        userIds: [a.user.id, null, b.user.id, null], names: ["levan_j", "Bot Gio", "ნიკა", "Bot Luka"],
+        totals: [900, 400, 100, -300], pulkas: [{ deals: [], total: [1, 2, 3, 4] }],
+      });
       expect(changes[1]).toBeNull();
       expect(changes[0]!.delta).toBeGreaterThan(0);
       expect(changes[2]!.after).toBe(1500 + changes[2]!.delta);
@@ -28,7 +32,13 @@ function suite(name: string, make: () => Store) {
       const mine = lb.find((u) => u.id === a.user.id)!;
       expect(mine.rank).toBeLessThan(lb.find((u) => u.id === b.user.id)!.rank);
       const games = await s.recentGames(a.user.id, 5);
-      expect(games[0]).toMatchObject({ place: 1, score: 900, ratingBefore: 1500 });
+      expect(games[0]).toMatchObject({ id: matchId, place: 1, score: 900, ratingBefore: 1500 });
+      expect(games[0].players.map((p) => p.name)).toEqual(["levan_j", "Bot Gio", "ნიკა", "Bot Luka"]);
+      expect(await s.recentGames(a.user.id, 5, games[0].finishedAt)).toEqual([]);
+      const m = (await s.match(matchId))!;
+      expect(m.players[2]).toMatchObject({ name: "ნიკა", place: 3, bot: false, ratingBefore: 1500 });
+      expect(m.players[1]).toMatchObject({ bot: true, ratingAfter: null });
+      expect(m.pulkas).toEqual([{ deals: [], total: [1, 2, 3, 4] }]);
 
       const up = await s.updateProfile(a.user.id, { firstName: "Levani", nickname: "levani", avatar: parseAvatar(PNG) });
       expect(up.firstName).toBe("Levani");

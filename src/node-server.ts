@@ -203,6 +203,16 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     if (!u) return send(req, res, 404, { error: "not found" });
     return send(req, res, 200, { user: publicUser(u), games: await store.recentGames(u.id, 20) });
   }
+  const ug = url.pathname.match(/^\/api\/users\/([0-9a-f-]{36})\/games$/i);
+  if (ug) {
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 20) || 20));
+    return send(req, res, 200, { games: await store.recentGames(ug[1], limit, url.searchParams.get("before") ?? undefined) });
+  }
+  const gm = url.pathname.match(/^\/api\/games\/([0-9a-f-]{36})$/i);
+  if (gm) {
+    const m = await store.match(gm[1]);
+    return m ? send(req, res, 200, { match: m }) : send(req, res, 404, { error: "not found" });
+  }
   const m = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)$/);
   if (m) {
     const info = rooms.get(m[1].toUpperCase())?.core.info();

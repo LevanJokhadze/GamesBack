@@ -39,7 +39,7 @@ export interface RoomHost {
    * in "hello", and finished games are rated.
    */
   resolveUser?(token: string): Promise<UserInfo | null>;
-  rateGame?(game: FinishedGame): Promise<(RatingChange | null)[]>;
+  rateGame?(game: FinishedGame): Promise<{ matchId: string; changes: (RatingChange | null)[] }>;
 }
 
 export interface UserInfo {
@@ -52,9 +52,14 @@ export interface UserInfo {
 export interface FinishedGame {
   code: string;
   mode: string;
+  khishti: number;
   /** userId per seat, null for bots. */
   userIds: (string | null)[];
+  /** Display name per seat at the time of the game. */
+  names: string[];
   totals: number[];
+  /** Full per-deal results, for the match summary. */
+  pulkas: unknown[];
 }
 
 export interface RatingChange {
@@ -94,6 +99,7 @@ export interface RoomData {
   turnKey?: string;
   /** Rating changes of the last finished game, per seat. */
   ratingChanges?: (RatingChange | null)[] | null;
+  matchId?: string | null;
 }
 
 type ClientMsg =
@@ -258,16 +264,21 @@ export class RoomCore {
     const d = this.data!;
     d.status = "finished";
     d.ratingChanges = null;
+    d.matchId = null;
     if (!this.host.rateGame || !d.game) return;
     try {
       const changes = await this.host.rateGame({
         code: d.code,
         mode: d.config.mode,
+        khishti: d.config.khishti,
         userIds: d.seats.map((s) => s?.userId ?? null),
+        names: d.seats.map((s, i) => s?.name ?? `#${i + 1}`),
         totals: d.game.totals.slice(),
+        pulkas: d.game.pulkas,
       });
-      d.ratingChanges = changes;
-      changes.forEach((c, i) => {
+      d.ratingChanges = changes.changes;
+      d.matchId = changes.matchId;
+      changes.changes.forEach((c, i) => {
         if (c && d.seats[i]) d.seats[i]!.rating = c.after;
       });
     } catch (e) {
@@ -332,6 +343,7 @@ export class RoomCore {
         d.status = "lobby";
         d.game = null;
         d.ratingChanges = null;
+        d.matchId = null;
         // Free the seats of players who left; keep bots and connected people.
         const online = this.connectedIds();
         d.seats = d.seats.map((s) => (s && (s.playerId === null || online.has(s.playerId)) ? s : null));
@@ -461,6 +473,7 @@ export class RoomCore {
       serverTime: Date.now(),
       chat: d.chat.slice(-30),
       ratingChanges: d.ratingChanges ?? null,
+      matchId: d.matchId ?? null,
       accounts: Boolean(this.host.resolveUser),
       seats: d.seats.map((s, i) =>
         s
