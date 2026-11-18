@@ -10,10 +10,10 @@ function suite(name: string, make: () => Store) {
       const s = make();
       await s.init();
       const run = Math.random().toString(36).slice(2, 7);
-      const a = await s.register({ nickname: "levan_j" + run, firstName: "Levan", lastName: "Jokhadze", avatar: parseAvatar(PNG) });
-      const b = await s.register({ nickname: "ნიკა" + run, firstName: "Nika", lastName: "Test", avatar: parseAvatar(PNG) });
-      await expect(s.register({ nickname: ("levan_j" + run).toUpperCase(), firstName: "X", lastName: "Y", avatar: parseAvatar(PNG) })).rejects.toThrow(/taken/);
-      await expect(s.register({ nickname: "a b", firstName: "X", lastName: "Y", avatar: parseAvatar(PNG) })).rejects.toThrow(/Nickname/);
+      const a = await s.register({ nickname: "levan_j" + run, firstName: "Levan", lastName: "Jokhadze", avatar: parseAvatar(PNG), password: "secret123" });
+      const b = await s.register({ nickname: "ნიკა" + run, firstName: "Nika", lastName: "Test", avatar: parseAvatar(PNG), password: "secret123" });
+      await expect(s.register({ nickname: ("levan_j" + run).toUpperCase(), firstName: "X", lastName: "Y", avatar: parseAvatar(PNG), password: "secret123" })).rejects.toThrow(/taken/);
+      await expect(s.register({ nickname: "a b", firstName: "X", lastName: "Y", avatar: parseAvatar(PNG), password: "secret123" })).rejects.toThrow(/Nickname/);
       expect(a.user.rating).toBe(1500);
       expect((await s.userByToken(a.token))?.id).toBe(a.user.id);
       expect(await s.userByToken("nope-nope-nope-nope-nope")).toBeNull();
@@ -41,7 +41,22 @@ function suite(name: string, make: () => Store) {
       expect(m.players[1]).toMatchObject({ bot: true, ratingAfter: null });
       expect(m.pulkas).toEqual([{ deals: [], total: [1, 2, 3, 4] }]);
 
-      const up = await s.updateProfile(a.user.id, { firstName: "Levani", nickname: "levani" + run, avatar: parseAvatar(PNG) });
+      // Log in from another device with the password; both sessions keep working.
+      await expect(s.login(a.user.nickname.toUpperCase(), "wrong-pass")).rejects.toThrow(/Wrong/);
+      await expect(s.login("nobody_" + run, "secret123")).rejects.toThrow(/Wrong/);
+      const second = await s.login(a.user.nickname.toUpperCase(), "secret123");
+      expect(second.user.id).toBe(a.user.id);
+      expect(second.user.hasPassword).toBe(true);
+      expect((await s.userByToken(second.token))?.id).toBe(a.user.id);
+      expect((await s.userByToken(a.token))?.id).toBe(a.user.id);
+      await s.logout(second.token);
+      expect(await s.userByToken(second.token)).toBeNull();
+      await s.updateProfile(a.user.id, { password: "newpass1" });
+      await expect(s.login(a.user.nickname, "secret123")).rejects.toThrow(/Wrong/);
+      expect((await s.login(a.user.nickname, "newpass1")).user.id).toBe(a.user.id);
+      await expect(s.register({ nickname: "short_" + run, firstName: "X", lastName: "Y", avatar: parseAvatar(PNG), password: "123" })).rejects.toThrow(/Password/);
+
+      const up = await s.updateProfile(a.user.id, { firstName: "Levani", nickname: "levani" + run, avatar: parseAvatar(PNG), password: "secret123" });
       expect(up.firstName).toBe("Levani");
       expect(up.nickname).toBe("levani" + run);
       expect(up.avatarVersion).toBe(2);
@@ -52,8 +67,8 @@ function suite(name: string, make: () => Store) {
       const s = make();
       await s.init();
       const tag = Math.random().toString(36).slice(2, 8);
-      const a = await s.register({ nickname: "pa_" + tag, firstName: "A", lastName: "A", avatar: parseAvatar(PNG) });
-      const b = await s.register({ nickname: "pb_" + tag, firstName: "B", lastName: "B", avatar: parseAvatar(PNG) });
+      const a = await s.register({ nickname: "pa_" + tag, firstName: "A", lastName: "A", avatar: parseAvatar(PNG), password: "secret123" });
+      const b = await s.register({ nickname: "pb_" + tag, firstName: "B", lastName: "B", avatar: parseAvatar(PNG), password: "secret123" });
       // a (seat 0) and b (seat 2) are partners; a scored little but the team won 600 to 500.
       const { matchId, changes } = await s.rateGame({
         code: "PAIRS", mode: "standard", khishti: -200, pairs: true,

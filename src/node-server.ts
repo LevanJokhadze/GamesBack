@@ -126,6 +126,22 @@ async function authUser(req: IncomingMessage): Promise<User | null> {
   return m ? store.userByToken(m[1]) : null;
 }
 
+// Failed logins per IP: at most 10 in 10 minutes.
+const loginFails = new Map<string, number[]>();
+function clientIp(req: IncomingMessage): string {
+  return String(req.headers["x-forwarded-for"] ?? req.socket.remoteAddress ?? "").split(",")[0].trim();
+}
+function loginAllowed(ip: string): boolean {
+  const now = Date.now();
+  const list = (loginFails.get(ip) ?? []).filter((t) => now - t < 10 * 60_000);
+  loginFails.set(ip, list);
+  if (loginFails.size > 10_000) loginFails.clear();
+  return list.length < 10;
+}
+function loginFailed(ip: string): void {
+  loginFails.set(ip, [...(loginFails.get(ip) ?? []), Date.now()]);
+}
+
 const server = createServer((req, res) => {
   handle(req, res).catch((e) => {
     if (e instanceof InputError) return send(req, res, 400, { error: e.message });
@@ -159,8 +175,27 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       firstName: String(body.firstName ?? ""),
       lastName: String(body.lastName ?? ""),
       avatar: parseAvatar(body.avatar),
+      password: String(body.password ?? ""),
     });
-    return send(req, res, 201, { token, user: publicUser(user) });
+    return send(req, res, 201, { token, user: { ...publicUser(user), hasPassword: user.hasPassword } });
+  }
+  if (url.pathname === "/api/login" && req.method === "POST") {
+    if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
+    const ip = clientIp(req);
+    if (!loginAllowed(ip)) return send(req, res, 429, { error: "Too many attempts. Try again in a few minutes." });
+    const body = await readJson(req, 4096);
+    try {
+      const { token, user } = await store.login(String(body.nickname ?? ""), String(body.password ?? ""));
+      return send(req, res, 200, { token, user: { ...publicUser(user), hasPassword: user.hasPassword } });
+    } catch (e) {
+      if (e instanceof InputError) loginFailed(ip);
+      throw e;
+    }
+  }
+  if (url.pathname === "/api/logout" && req.method === "POST") {
+    const m = (req.headers.authorization ?? "").match(/^Bearer (\S{20,128})$/);
+    if (m) await store.logout(m[1]);
+    return send(req, res, 200, { ok: true });
   }
   if (url.pathname === "/api/me") {
     const me = await authUser(req);
@@ -173,10 +208,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
         firstName: body.firstName === undefined ? undefined : String(body.firstName),
         lastName: body.lastName === undefined ? undefined : String(body.lastName),
         avatar: body.avatar ? parseAvatar(body.avatar) : undefined,
+        password: body.password ? String(body.password) : undefined,
       });
-      return send(req, res, 200, { user: publicUser(updated) });
+      return send(req, res, 200, { user: { ...publicUser(updated), hasPassword: updated.hasPassword } });
     }
-    return send(req, res, 200, { user: publicUser(me) });
+    return send(req, res, 200, { user: { ...publicUser(me), hasPassword: me.hasPassword } });
   }
   if (url.pathname === "/api/leaderboard") {
     const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") ?? 100) || 100));

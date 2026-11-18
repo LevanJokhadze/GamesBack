@@ -1,7 +1,8 @@
 // Player accounts, ratings and game history for the Node server.
 // PgStore is used when DATABASE_URL is set (Railway Postgres); MemoryStore otherwise (local dev, tests).
 
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual } from "node:crypto";
+import { promisify } from "node:util";
 import pg from "pg";
 import { BOT_RATING, START_RATING, eloDeltas } from "./engine/elo";
 import { rankingScores } from "./engine/game";
@@ -18,6 +19,8 @@ export interface User {
   peak: number;
   avatarVersion: number;
   createdAt: string;
+  /** Can log in with nickname + password on any device. */
+  hasPassword: boolean;
 }
 
 export interface Avatar {
@@ -68,6 +71,7 @@ export interface ProfilePatch {
   firstName?: string;
   lastName?: string;
   avatar?: Avatar;
+  password?: string;
 }
 
 /** 3-20 letters (Latin or Georgian), digits, "_" or "."; unique ignoring case. */
@@ -81,7 +85,10 @@ export function cleanNickname(v: unknown): string {
 
 export interface Store {
   init(): Promise<void>;
-  register(p: { nickname: string; firstName: string; lastName: string; avatar: Avatar }): Promise<{ token: string; user: User }>;
+  register(p: { nickname: string; firstName: string; lastName: string; avatar: Avatar; password: string }): Promise<{ token: string; user: User }>;
+  /** Nickname (any case) + password -> a new session token for this device. */
+  login(nickname: string, password: string): Promise<{ token: string; user: User }>;
+  logout(token: string): Promise<void>;
   userByToken(token: string): Promise<User | null>;
   userById(id: string): Promise<User | null>;
   updateProfile(id: string, p: ProfilePatch): Promise<User>;
@@ -120,6 +127,35 @@ export function parseAvatar(v: unknown): Avatar {
   return { type: jpeg ? "image/jpeg" : png ? "image/png" : "image/webp", data };
 }
 
+const scrypt = promisify(scryptCb) as (pw: string, salt: Buffer, len: number) => Promise<Buffer>;
+
+/** 6-100 characters. */
+export function cleanPassword(v: unknown): string {
+  const s = String(v ?? "");
+  if (s.length < 6) throw new InputError("Password must be at least 6 characters");
+  if (s.length > 100) throw new InputError("Password is too long");
+  return s;
+}
+
+export async function hashPassword(pw: string): Promise<string> {
+  const salt = randomBytes(16);
+  const key = await scrypt(pw, salt, 32);
+  return `scrypt$${salt.toString("base64")}$${key.toString("base64")}`;
+}
+
+export async function checkPassword(pw: string, stored: string | null | undefined): Promise<boolean> {
+  const m = String(stored ?? "").match(/^scrypt\$([^$]+)\$([^$]+)$/);
+  if (!m) {
+    await scrypt(pw, randomBytes(16), 32); // same time either way
+    return false;
+  }
+  const want = Buffer.from(m[2], "base64");
+  const got = await scrypt(pw, Buffer.from(m[1], "base64"), want.length);
+  return timingSafeEqual(want, got);
+}
+
+const BAD_LOGIN = "Wrong nickname or password";
+
 function newToken(): string {
   return randomBytes(32).toString("base64url");
 }
@@ -155,7 +191,8 @@ function computeChanges(game: FinishedGame, users: Map<string, User>): (RatingCh
 // ---------- in-memory store ----------
 
 export class MemoryStore implements Store {
-  private users = new Map<string, User & { tokenHash: string; avatar: Avatar }>();
+  private users = new Map<string, User & { tokenHash: string; avatar: Avatar; passwordHash: string | null }>();
+  private sessions = new Map<string, string>();
   private games: { id: string; finishedAt: string; game: FinishedGame; changes: (RatingChange | null)[] }[] = [];
 
   async init() {}
@@ -165,9 +202,10 @@ export class MemoryStore implements Store {
     return false;
   }
 
-  async register({ nickname, firstName, lastName, avatar }: { nickname: string; firstName: string; lastName: string; avatar: Avatar }) {
+  async register({ nickname, firstName, lastName, avatar, password }: { nickname: string; firstName: string; lastName: string; avatar: Avatar; password: string }) {
     const token = newToken();
     const nick = cleanNickname(nickname);
+    const passwordHash = await hashPassword(cleanPassword(password));
     if (this.nickTaken(nick)) throw new InputError("That nickname is taken");
     const user: User = {
       id: randomUUID(),
@@ -180,18 +218,34 @@ export class MemoryStore implements Store {
       peak: START_RATING,
       avatarVersion: 1,
       createdAt: new Date().toISOString(),
+      hasPassword: true,
     };
-    this.users.set(user.id, { ...user, tokenHash: hashToken(token), avatar });
+    this.users.set(user.id, { ...user, tokenHash: hashToken(token), avatar, passwordHash });
     return { token, user };
   }
 
-  private pub(u: User & { tokenHash: string; avatar: Avatar }): User {
-    const { tokenHash: _t, avatar: _a, ...rest } = u;
-    return { ...rest };
+  private pub(u: User & { tokenHash: string; avatar: Avatar; passwordHash: string | null }): User {
+    const { tokenHash: _t, avatar: _a, passwordHash, ...rest } = u;
+    return { ...rest, hasPassword: !!passwordHash };
+  }
+
+  async login(nickname: string, password: string) {
+    const nick = String(nickname ?? "").trim().toLowerCase();
+    const u = [...this.users.values()].find((x) => x.nickname.toLowerCase() === nick);
+    if (!(await checkPassword(String(password ?? ""), u?.passwordHash)) || !u) throw new InputError(BAD_LOGIN);
+    const token = newToken();
+    this.sessions.set(hashToken(token), u.id);
+    return { token, user: this.pub(u) };
+  }
+
+  async logout(token: string) {
+    this.sessions.delete(hashToken(token));
   }
 
   async userByToken(token: string) {
     const h = hashToken(token);
+    const sid = this.sessions.get(h);
+    if (sid && this.users.has(sid)) return this.pub(this.users.get(sid)!);
     for (const u of this.users.values()) if (u.tokenHash === h) return this.pub(u);
     return null;
   }
@@ -209,6 +263,7 @@ export class MemoryStore implements Store {
       if (this.nickTaken(nick, id)) throw new InputError("That nickname is taken");
       u.nickname = nick;
     }
+    if (p.password !== undefined) u.passwordHash = await hashPassword(cleanPassword(p.password));
     if (p.firstName !== undefined) u.firstName = cleanPersonName(p.firstName);
     if (p.lastName !== undefined) u.lastName = cleanPersonName(p.lastName);
     if (p.avatar) {
@@ -321,6 +376,14 @@ CREATE TABLE IF NOT EXISTS users (
   last_seen timestamptz NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS users_nickname_idx ON users (lower(nickname));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash text;
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash text PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_seen timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
 CREATE INDEX IF NOT EXISTS users_rating_idx ON users (rating DESC) WHERE games > 0;
 CREATE TABLE IF NOT EXISTS games (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -346,7 +409,7 @@ CREATE TABLE IF NOT EXISTS game_players (
 CREATE INDEX IF NOT EXISTS game_players_user_idx ON game_players (user_id, game_id);
 `;
 
-const USER_COLS = `id, nickname, first_name, last_name, rating, games, wins, peak, avatar_version, created_at`;
+const USER_COLS = `id, nickname, first_name, last_name, rating, games, wins, peak, avatar_version, created_at, (password_hash IS NOT NULL) AS has_password`;
 
 function rowToUser(r: Record<string, unknown>): User {
   return {
@@ -360,6 +423,7 @@ function rowToUser(r: Record<string, unknown>): User {
     peak: Number(r.peak),
     avatarVersion: Number(r.avatar_version),
     createdAt: new Date(r.created_at as string).toISOString(),
+    hasPassword: Boolean(r.has_password),
   };
 }
 
@@ -380,13 +444,17 @@ export class PgStore implements Store {
     await this.pool.query(SCHEMA);
   }
 
-  async register({ nickname, firstName, lastName, avatar }: { nickname: string; firstName: string; lastName: string; avatar: Avatar }) {
+  async register({ nickname, firstName, lastName, avatar, password }: { nickname: string; firstName: string; lastName: string; avatar: Avatar; password: string }) {
     const token = newToken();
+    const nick = cleanNickname(nickname);
+    const first = cleanPersonName(firstName);
+    const last = cleanPersonName(lastName);
+    const passwordHash = await hashPassword(cleanPassword(password));
     try {
       const { rows } = await this.pool.query(
-        `INSERT INTO users (token_hash, nickname, first_name, last_name, avatar, avatar_type)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${USER_COLS}`,
-        [hashToken(token), cleanNickname(nickname), cleanPersonName(firstName), cleanPersonName(lastName), avatar.data, avatar.type],
+        `INSERT INTO users (token_hash, nickname, first_name, last_name, avatar, avatar_type, password_hash)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING ${USER_COLS}`,
+        [hashToken(token), nick, first, last, avatar.data, avatar.type, passwordHash],
       );
       return { token, user: rowToUser(rows[0]) };
     } catch (e) {
@@ -394,11 +462,25 @@ export class PgStore implements Store {
     }
   }
 
+  async login(nickname: string, password: string) {
+    const { rows } = await this.pool.query(`SELECT id, password_hash FROM users WHERE lower(nickname) = lower($1)`, [String(nickname ?? "").trim()]);
+    const ok = await checkPassword(String(password ?? ""), rows[0]?.password_hash);
+    if (!ok || !rows[0]) throw new InputError(BAD_LOGIN);
+    const token = newToken();
+    await this.pool.query(`INSERT INTO sessions (token_hash, user_id) VALUES ($1, $2)`, [hashToken(token), rows[0].id]);
+    const user = await this.userById(String(rows[0].id));
+    return { token, user: user! };
+  }
+
+  async logout(token: string) {
+    await this.pool.query(`DELETE FROM sessions WHERE token_hash = $1`, [hashToken(token)]);
+  }
+
   async userByToken(token: string) {
-    const { rows } = await this.pool.query(
-      `UPDATE users SET last_seen = now() WHERE token_hash = $1 RETURNING ${USER_COLS}`,
-      [hashToken(token)],
-    );
+    const h = hashToken(token);
+    const s = await this.pool.query(`UPDATE sessions SET last_seen = now() WHERE token_hash = $1 RETURNING user_id`, [h]);
+    if (s.rows[0]) return this.userById(String(s.rows[0].user_id));
+    const { rows } = await this.pool.query(`UPDATE users SET last_seen = now() WHERE token_hash = $1 RETURNING ${USER_COLS}`, [h]);
     return rows[0] ? rowToUser(rows[0]) : null;
   }
 
@@ -418,7 +500,8 @@ export class PgStore implements Store {
          last_name = COALESCE($3, last_name),
          avatar = COALESCE($4, avatar),
          avatar_type = COALESCE($5, avatar_type),
-         avatar_version = avatar_version + CASE WHEN $4::bytea IS NULL THEN 0 ELSE 1 END
+         avatar_version = avatar_version + CASE WHEN $4::bytea IS NULL THEN 0 ELSE 1 END,
+         password_hash = COALESCE($7, password_hash)
        WHERE id = $1 RETURNING ${USER_COLS}`,
       [
         id,
@@ -427,6 +510,7 @@ export class PgStore implements Store {
         p.avatar?.data ?? null,
         p.avatar?.type ?? null,
         p.nickname !== undefined ? cleanNickname(p.nickname) : null,
+        p.password !== undefined ? await hashPassword(cleanPassword(p.password)) : null,
       ],
       ));
     } catch (e) {
