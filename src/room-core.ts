@@ -40,6 +40,8 @@ export interface RoomHost {
    */
   resolveUser?(token: string): Promise<UserInfo | null>;
   rateGame?(game: FinishedGame): Promise<{ matchId: string; changes: (RatingChange | null)[] }>;
+  /** Takes rating points from a player who stopped playing; returns the new rating. */
+  penalize?(userId: string, amount: number, reason: string, roomCode: string): Promise<number | null>;
 }
 
 export interface UserInfo {
@@ -76,6 +78,18 @@ interface Seat {
   userId?: string | null;
   avatarUrl?: string | null;
   rating?: number | null;
+  /** Stopped responding: a bot plays for them until they come back or this time passes. */
+  afkKickAt?: number | null;
+  /** Removed from the match for not coming back; a bot plays the seat. */
+  left?: boolean;
+}
+
+/** Server notice shown in the chat (the client translates it). */
+export interface SysNotice {
+  kind: "warn" | "afk" | "back" | "kicked";
+  name: string;
+  /** Rating points taken, if any. */
+  penalty?: number;
 }
 
 interface ChatLine {
@@ -83,6 +97,7 @@ interface ChatLine {
   name: string;
   text: string;
   at: number;
+  sys?: SysNotice;
 }
 
 export interface RoomData {
@@ -99,6 +114,8 @@ export interface RoomData {
   chat: ChatLine[];
   /** Identifies whose turn the deadline was computed for. */
   turnKey?: string;
+  /** "turn": normal time to play; "warn": the extra minute before a bot takes over. */
+  turnStage?: "turn" | "warn";
   /** Rating changes of the last finished game, per seat. */
   ratingChanges?: (RatingChange | null)[] | null;
   matchId?: string | null;
@@ -115,6 +132,10 @@ type ClientMsg =
   | { t: "bid"; bid: number }
   | { t: "play"; cardId: string; joker?: JokerMode }
   | { t: "chat"; text: string }
+  | { t: "rtc"; to: string; data: unknown }
+  | { t: "voice"; on: boolean }
+  | { t: "talk"; on: boolean }
+  | { t: "back" }
   | { t: "rematch" }
   | { t: "ping" };
 
@@ -123,8 +144,14 @@ const BOT_NAMES = ["Bot Nino", "Bot Gio", "Bot Tamo", "Bot Luka"];
 const envDelay = Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.BOT_DELAY_MS);
 const BOT_DELAY = envDelay >= 0 ? envDelay : 750;
 const AFTER_TRICK_DELAY = envDelay >= 0 ? envDelay : 1600;
-const HUMAN_TURN_MS = 60_000;
-const DISCONNECTED_TURN_MS = 12_000;
+// Time to play, then one warning minute, then a bot plays (-5) and the player has 2 minutes to
+// come back before they are removed from the match (-25 more, 30 in all).
+const envTurn = Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.TURN_MS);
+const TURN_MS = envTurn > 0 ? envTurn : 30_000;
+const WARN_MS = envTurn > 0 ? envTurn * 2 : 60_000;
+const KICK_MS = envTurn > 0 ? envTurn * 4 : 120_000;
+export const AFK_PENALTY = 5;
+export const KICK_PENALTY = 25;
 const IDLE_CLEANUP_MS = 12 * 60 * 60 * 1000;
 const KHISHTI_OPTIONS = [-200, -500, -900];
 
@@ -133,7 +160,32 @@ function cleanName(name: unknown): string {
   return n || "Player";
 }
 
+/**
+ * Public id of a connected person, used for chat, the people list and voice-call signalling.
+ * Derived from the private player id so clients never see each other's player ids.
+ */
+export function peerOf(playerId: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < playerId.length; i++) {
+    const c = playerId.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ c, 0x5bd1e995);
+  }
+  return ((h1 >>> 0).toString(36) + (h2 >>> 0).toString(36)).slice(0, 12);
+}
+
+interface Person {
+  name: string;
+  avatarUrl: string | null;
+  /** Joined the voice chat. */
+  voice: boolean;
+  lastChat: number;
+}
+
 export class RoomCore {
+  /** Who is connected (players and spectators); in memory only. */
+  private people = new Map<string, Person>();
 
   constructor(private host: RoomHost, public data: RoomData | null) {}
 
@@ -195,6 +247,14 @@ export class RoomCore {
         return;
       }
       if (!playerId) return this.sendError(ws, "Say hello first");
+      if (msg.t === "rtc") return this.relayRtc(playerId, msg, raw.length);
+      if (msg.t === "talk") return this.relayTalk(playerId, Boolean(msg.on));
+      if (msg.t === "voice") {
+        const p = this.people.get(playerId);
+        if (p) p.voice = Boolean(msg.on);
+        this.broadcast();
+        return;
+      }
       await this.onAction(playerId, msg);
     } catch (e) {
       if (e instanceof RuleError) return this.sendError(ws, e.message);
@@ -204,8 +264,42 @@ export class RoomCore {
   }
 
   async onClose(ws: Conn): Promise<void> {
+    const id = ws.getPlayerId();
     ws.setPlayerId(null);
+    if (id && !this.connectedIds().has(id)) this.people.delete(id);
     if (this.data) await this.afterChange();
+  }
+
+  /** Forwards a WebRTC offer/answer/candidate to one person; the server never looks inside. */
+  private relayRtc(playerId: string, msg: { to: string; data: unknown }, size: number): void {
+    if (size > 20_000) return;
+    const from = peerOf(playerId);
+    const out = JSON.stringify({ t: "rtc", from, data: msg.data });
+    for (const ws of this.host.connections()) {
+      const id = ws.getPlayerId();
+      if (id && id !== playerId && peerOf(id) === msg.to) {
+        try {
+          ws.send(out);
+        } catch {
+          /* closed */
+        }
+      }
+    }
+  }
+
+  /** Tells everyone else who is talking right now (push-to-talk). */
+  private relayTalk(playerId: string, on: boolean): void {
+    const out = JSON.stringify({ t: "talk", peer: peerOf(playerId), on });
+    for (const ws of this.host.connections()) {
+      const id = ws.getPlayerId();
+      if (id && id !== playerId) {
+        try {
+          ws.send(out);
+        } catch {
+          /* closed */
+        }
+      }
+    }
   }
 
   private sendError(ws: Conn, message: string): void {
@@ -248,6 +342,8 @@ export class RoomCore {
       profile = { name: cleanName(msg.name) };
     }
     ws.setPlayerId(playerId);
+    const prev = this.people.get(playerId);
+    this.people.set(playerId, { name: profile.name, avatarUrl: profile.avatarUrl ?? null, voice: prev?.voice ?? false, lastChat: prev?.lastChat ?? 0 });
     let seat = this.seatOf(playerId);
     if (seat === null && d.status === "lobby") {
       const free = d.seats.findIndex((s) => s === null);
@@ -265,6 +361,7 @@ export class RoomCore {
   private async finishGame(): Promise<void> {
     const d = this.data!;
     d.status = "finished";
+    for (const s of d.seats) if (s) s.afkKickAt = null;
     d.ratingChanges = null;
     d.matchId = null;
     if (!this.host.rateGame || !d.game) return;
@@ -350,15 +447,24 @@ export class RoomCore {
         d.matchId = null;
         // Free the seats of players who left; keep bots and connected people.
         const online = this.connectedIds();
-        d.seats = d.seats.map((s) => (s && (s.playerId === null || online.has(s.playerId)) ? s : null));
+        d.seats = d.seats.map((s) => (s && !s.left && (s.playerId === null || online.has(s.playerId)) ? s : null));
         break;
       }
       case "chat": {
         const text = String(msg.text ?? "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 200);
         if (!text) return;
-        const name = seat !== null ? d.seats[seat]!.name : "Guest";
+        const person = this.people.get(playerId);
+        if (person) {
+          if (Date.now() - person.lastChat < 400) throw new RuleError("Slow down");
+          person.lastChat = Date.now();
+        }
+        const name = seat !== null ? d.seats[seat]!.name : person?.name ?? "Guest";
         d.chat.push({ seat, name, text, at: Date.now() });
         if (d.chat.length > 40) d.chat = d.chat.slice(-40);
+        break;
+      }
+      case "back": {
+        if (seat !== null) this.comeBack(seat);
         break;
       }
       case "trump":
@@ -366,6 +472,7 @@ export class RoomCore {
       case "play": {
         if (d.status !== "playing" || !d.game) throw new RuleError("No game in progress");
         if (seat === null) throw new RuleError("You are watching this game");
+        this.comeBack(seat);
         const action: BotAction =
           msg.t === "trump"
             ? { t: "trump", suit: msg.suit ?? null }
@@ -391,9 +498,67 @@ export class RoomCore {
     const seat = d.seats[g.turn];
     const justFinishedTrick = g.phase === "playing" && g.trick.length === 0 && g.lastTrick !== null;
     const extra = justFinishedTrick ? AFTER_TRICK_DELAY : 0;
-    if (!seat || seat.playerId === null) return Date.now() + BOT_DELAY + extra;
-    const online = this.connectedIds().has(seat.playerId);
-    return Date.now() + (online ? HUMAN_TURN_MS : DISCONNECTED_TURN_MS) + extra;
+    if (!seat || seat.playerId === null || seat.afkKickAt) return Date.now() + BOT_DELAY + extra;
+    return Date.now() + TURN_MS + extra;
+  }
+
+  private notice(n: SysNotice): void {
+    const d = this.data!;
+    d.chat.push({ seat: null, name: "", text: "", at: Date.now(), sys: n });
+    if (d.chat.length > 40) d.chat = d.chat.slice(-40);
+  }
+
+  private async penalize(seat: Seat, amount: number, reason: string): Promise<number | undefined> {
+    if (!seat.userId || !this.host.penalize) return undefined;
+    try {
+      const r = await this.host.penalize(seat.userId, amount, reason, this.data!.code);
+      if (r !== null) seat.rating = r;
+      return amount;
+    } catch (e) {
+      console.error("penalty failed", e);
+      return undefined;
+    }
+  }
+
+  /** The player did not play in time, even after the warning: a bot plays for them from now on. */
+  private async goAfk(i: number): Promise<void> {
+    const seat = this.data!.seats[i]!;
+    seat.afkKickAt = Date.now() + KICK_MS;
+    const penalty = await this.penalize(seat, AFK_PENALTY, "afk");
+    this.notice({ kind: "afk", name: seat.name, penalty });
+  }
+
+  /** The player is back (pressed "I'm back" or made a move): stop the bot and the kick clock. */
+  private comeBack(i: number): void {
+    const seat = this.data!.seats[i];
+    if (!seat?.afkKickAt) return;
+    seat.afkKickAt = null;
+    this.notice({ kind: "back", name: seat.name });
+  }
+
+  /** Did not come back in time: removed from the match, a bot keeps the seat. */
+  private async kick(i: number): Promise<void> {
+    const d = this.data!;
+    const seat = d.seats[i]!;
+    const penalty = await this.penalize(seat, KICK_PENALTY, "abandoned");
+    const gone = seat.playerId;
+    d.seats[i] = { playerId: null, name: seat.name, avatarUrl: seat.avatarUrl, userId: null, rating: null, left: true };
+    this.notice({ kind: "kicked", name: seat.name, penalty });
+    if (gone && d.hostId === gone) {
+      const online = this.connectedIds();
+      d.hostId = d.seats.find((s) => s?.playerId && online.has(s.playerId))?.playerId ?? null;
+    }
+  }
+
+  private nextKick(): number | null {
+    const times = this.data!.seats.map((s) => s?.afkKickAt ?? null).filter((t): t is number => t !== null);
+    return times.length ? Math.min(...times) : null;
+  }
+
+  private nextWake(): number {
+    const d = this.data!;
+    const t = [d.deadline, d.status === "playing" ? this.nextKick() : null].filter((x): x is number => x !== null);
+    return t.length ? Math.min(...t) : Date.now() + IDLE_CLEANUP_MS;
   }
 
   private turnKey(): string {
@@ -404,31 +569,58 @@ export class RoomCore {
 
   private async afterChange(): Promise<void> {
     const d = this.data!;
-    // Reset the turn clock when the actor changes or their connection changes.
-    const key = this.turnKey();
+    // Reset the turn clock when the actor changes or a player goes on or off autopilot.
     const g = d.game;
-    const onlineKey = g && d.seats[g.turn]?.playerId ? String(this.connectedIds().has(d.seats[g.turn]!.playerId!)) : "";
-    const fullKey = `${key}|${onlineKey}`;
+    const afkKey = d.seats.map((s) => (s?.afkKickAt ? 1 : 0)).join("");
+    const fullKey = `${this.turnKey()}|${afkKey}`;
     if (fullKey !== d.turnKey || d.deadline === null) {
       d.deadline = this.computeDeadline();
       d.turnKey = fullKey;
+      d.turnStage = "turn";
     }
-    if (d.status !== "playing") d.deadline = null;
+    if (d.status !== "playing" || !g) {
+      d.deadline = null;
+      d.turnStage = "turn";
+    }
     await this.save();
-    await this.host.setTimer(d.deadline ?? Date.now() + IDLE_CLEANUP_MS);
+    await this.host.setTimer(this.nextWake());
     this.broadcast();
   }
 
   async onTimer(): Promise<void> {
     const d = this.data;
     if (!d) return;
-    if (d.status === "playing" && d.game && d.deadline !== null) {
-      if (Date.now() < d.deadline - 50) {
-        await this.host.setTimer(d.deadline);
+    if (d.status === "playing" && d.game) {
+      const now = Date.now();
+      let kicked = false;
+      for (let i = 0; i < SEATS; i++) {
+        const at = d.seats[i]?.afkKickAt;
+        if (at && now >= at - 50) {
+          await this.kick(i);
+          kicked = true;
+        }
+      }
+      if (d.deadline === null || now < d.deadline - 50) {
+        if (kicked) await this.afterChange();
+        else await this.host.setTimer(this.nextWake());
         return;
       }
       const g = d.game;
       const seat = g.turn;
+      const s = d.seats[seat];
+      if (s && s.playerId !== null && !s.afkKickAt) {
+        if (d.turnStage !== "warn") {
+          // First miss: one more minute, and everyone is told.
+          d.turnStage = "warn";
+          d.deadline = now + WARN_MS;
+          this.notice({ kind: "warn", name: s.name });
+          await this.save();
+          await this.host.setTimer(this.nextWake());
+          this.broadcast();
+          return;
+        }
+        await this.goAfk(seat);
+      }
       try {
         d.game = applyAction(g, seat, botAction(g, seat));
       } catch (e) {
@@ -474,8 +666,17 @@ export class RoomCore {
       you,
       config: d.config,
       deadline: d.deadline,
+      /** "warn" while the player to act is in their extra minute. */
+      turnStage: d.turnStage ?? "turn",
       serverTime: Date.now(),
       chat: d.chat.slice(-30),
+      /** Your public id (matches `people[].peer`). */
+      peer: peerOf(playerId),
+      /** Everyone connected right now, players and spectators. */
+      people: [...online].map((id) => {
+        const p = this.people.get(id);
+        return { peer: peerOf(id), name: p?.name ?? "Guest", avatarUrl: p?.avatarUrl ?? null, seat: this.seatOf(id), voice: p?.voice ?? false };
+      }),
       ratingChanges: d.ratingChanges ?? null,
       matchId: d.matchId ?? null,
       accounts: Boolean(this.host.resolveUser),
@@ -490,6 +691,9 @@ export class RoomCore {
               connected: s.playerId === null || online.has(s.playerId),
               host: s.playerId !== null && s.playerId === d.hostId,
               you: i === you,
+              /** A bot is playing for them; they are removed at this time unless they come back. */
+              afkKickAt: s.afkKickAt ?? null,
+              left: Boolean(s.left),
             }
           : null,
       ),

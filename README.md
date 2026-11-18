@@ -14,12 +14,23 @@ Frontend: [LevanJokhadze/Games](https://github.com/LevanJokhadze/Games).
 
 - Full rules engine (`src/engine`): deck, dealing, trump, bidding with the dealer restriction,
   joker play (high/low, leading with a named suit), trick resolution, scoring, khishti and premium.
-- Online rooms with 5-letter codes, reconnect by player id, host controls, spectators.
-- Bots fill empty seats. A human whose turn lasts 60 s (12 s if disconnected) is auto-played by a bot, so games never stall.
+- Online rooms with 5-letter codes, reconnect by player id, host controls.
+- **Spectators**: anyone who opens a full, started table watches it without seeing any cards,
+  shows up in the people list and can chat.
+- Bots fill empty seats.
+- **Players who stop responding**: 30 s to play, then a warning and one more minute. Still
+  nothing: −5 rating and a bot plays the seat. Not back within 2 minutes (a move or `back`):
+  removed from the match, −25 more (30 in all), and a bot finishes the game. Every step is
+  posted in the chat as a notice, and penalties are stored in `rating_penalties`.
+  `TURN_MS` scales all three timers (warning = 2×, removal = 4×) for testing.
+- **Chat and voice**: text chat for players and spectators; push-to-talk voice over WebRTC
+  between people who joined voice, with the room WebSocket as the signalling relay.
 - Rooms delete themselves after 12 hours without activity.
 - WebSocket Hibernation API, so idle rooms cost nothing.
 - **Accounts** (Node server): nickname (unique), first name, last name and photo are all required.
-  No password: registering returns a random token the browser keeps; the server stores only its SHA-256.
+  A password (6+ characters, scrypt) lets the player log in on any device; each login is its own
+  session token. The server stores only SHA-256 hashes of tokens. Failed logins are limited to
+  10 per IP per 10 minutes.
 - **Chess Elo**: every finished game with at least one account is rated (see below). Global
   leaderboard, per-player match history and a full summary of every match.
 - **Play in pairs**: partners sit opposite (seats 1 & 3 against 2 & 4), team points are added up
@@ -76,8 +87,10 @@ npm run simulate   # play 200 bot-only games and print bot accuracy
 | POST | `/api/rooms` | Create a room → `{ "code": "ABCDE" }` |
 | GET | `/api/rooms/:code` | Room info (404 if it doesn't exist) |
 | GET (WebSocket) | `/api/rooms/:code/ws` | Join a room |
-| POST | `/api/register` | `{nickname, firstName, lastName, avatar}` (avatar = JPEG/PNG/WebP data URL ≤ 300 KB) → `{token, user}` |
-| GET / PUT | `/api/me` | Your profile / change it (`Authorization: Bearer <token>`) |
+| POST | `/api/register` | `{nickname, firstName, lastName, avatar, password}` (avatar = JPEG/PNG/WebP data URL ≤ 300 KB) → `{token, user}` |
+| POST | `/api/login` | `{nickname, password}` (nickname in any case) → `{token, user}` for this device |
+| POST | `/api/logout` | Ends this device's session |
+| GET / PUT | `/api/me` | Your profile / change it, including `password` (`Authorization: Bearer <token>`) |
 | GET | `/api/leaderboard?limit=100` | Rated players by rating |
 | GET | `/api/users/:id` | Profile and the last 20 games |
 | GET | `/api/users/:id/games?limit=20&before=<ISO time>` | Match history, newest first, paged |
@@ -87,7 +100,9 @@ npm run simulate   # play 200 bot-only games and print bot accuracy
 WebSocket messages from the client (JSON): `hello {token}` (send first; without accounts
 `hello {playerId, name}`), `start`, `config {config: {mode, khishti, pairs}}`, `seat {seat}`, `addBot {seat}`, `removeSeat {seat}`,
 `trump {suit|null}`, `bid {bid}`, `play {cardId, joker?: {type: "high"|"low", suit?}}`,
-`chat {text}`, `rematch`, `ping`.
+`chat {text}`, `rematch`, `back` (end a bot takeover), `ping`.
+Voice: `voice {on}` (joined/left voice), `talk {on}` (push-to-talk, broadcast as `talk {peer, on}`),
+`rtc {to: peer, data}` (WebRTC signalling, delivered as `rtc {from: peer, data}`).
 The server answers with `state {room}` (a per-player view, own cards only) or `error {message}`.
 
 ## Deploy to Railway (Node)
