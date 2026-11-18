@@ -19,6 +19,21 @@ import {
   newGame,
   visibleHand,
 } from "./engine";
+import { BuraAction, BuraState, applyBura, buraActor, buraAutoDelay, buraBot, buraView, newBura } from "./bura";
+
+/** Which card game a room plays. */
+export type GameKind = "joker" | "bura";
+
+/** Room settings: the Joker options plus which game is played. */
+export interface RoomConfig extends GameConfig {
+  game: GameKind;
+}
+
+type AnyGame = GameState | BuraState;
+
+function isBuraGame(g: AnyGame | null | undefined): g is BuraState {
+  return (g as BuraState | null)?.kind === "bura";
+}
 
 /** One client connection. */
 export interface Conn {
@@ -107,8 +122,8 @@ export interface RoomData {
   hostId: string | null;
   status: "lobby" | "playing" | "finished";
   seats: (Seat | null)[];
-  config: GameConfig;
-  game: GameState | null;
+  config: RoomConfig;
+  game: AnyGame | null;
   /** When the current actor will be auto-played (bots, timeouts). */
   deadline: number | null;
   chat: ChatLine[];
@@ -124,13 +139,14 @@ export interface RoomData {
 type ClientMsg =
   | { t: "hello"; playerId?: string; name?: string; token?: string }
   | { t: "start" }
-  | { t: "config"; config: Partial<GameConfig> }
+  | { t: "config"; config: Partial<RoomConfig> }
   | { t: "seat"; seat: number }
   | { t: "addBot"; seat: number }
   | { t: "removeSeat"; seat: number }
   | { t: "trump"; suit: Suit | null }
   | { t: "bid"; bid: number }
   | { t: "play"; cardId: string; joker?: JokerMode }
+  | { t: "bura"; action: BuraAction }
   | { t: "chat"; text: string }
   | { t: "rtc"; to: string; data: unknown }
   | { t: "voice"; on: boolean }
@@ -195,7 +211,7 @@ export class RoomCore {
     await this.host.persist(this.data);
   }
 
-  async init(code: string): Promise<boolean> {
+  async init(code: string, game: GameKind = "joker"): Promise<boolean> {
     if (this.data) return false;
     this.data = {
       code,
@@ -204,7 +220,7 @@ export class RoomCore {
       hostId: null,
       status: "lobby",
       seats: [null, null, null, null],
-      config: { ...DEFAULT_CONFIG },
+      config: { ...DEFAULT_CONFIG, game, pairs: game === "bura" ? true : DEFAULT_CONFIG.pairs },
       game: null,
       deadline: null,
       chat: [],
@@ -220,6 +236,7 @@ export class RoomCore {
     return {
       code: d.code,
       status: d.status,
+      game: d.config.game ?? "joker",
       players: d.seats.filter((s) => s && s.playerId).length,
       open: d.seats.filter((s) => !s).length,
     };
@@ -365,16 +382,17 @@ export class RoomCore {
     d.ratingChanges = null;
     d.matchId = null;
     if (!this.host.rateGame || !d.game) return;
+    const g = d.game;
+    // Bura: every player gets their team's match points; the rounds are the summary.
+    const result = isBuraGame(g)
+      ? { mode: "bura", khishti: 0, pairs: true, totals: [0, 1, 2, 3].map((i) => g.match[i % 2]), pulkas: g.rounds as unknown[] }
+      : { mode: d.config.mode, khishti: d.config.khishti, pairs: Boolean(d.config.pairs), totals: g.totals.slice(), pulkas: g.pulkas as unknown[] };
     try {
       const changes = await this.host.rateGame({
         code: d.code,
-        mode: d.config.mode,
-        khishti: d.config.khishti,
-        pairs: Boolean(d.config.pairs),
+        ...result,
         userIds: d.seats.map((s) => s?.userId ?? null),
         names: d.seats.map((s, i) => s?.name ?? `#${i + 1}`),
-        totals: d.game.totals.slice(),
-        pulkas: d.game.pulkas,
       });
       d.ratingChanges = changes.changes;
       d.matchId = changes.matchId;
@@ -400,8 +418,10 @@ export class RoomCore {
         const mode = msg.config.mode === "nines" ? "nines" : msg.config.mode === "standard" ? "standard" : d.config.mode;
         const kh = Number(msg.config.khishti);
         const khishti = KHISHTI_OPTIONS.includes(kh) ? kh : d.config.khishti;
-        const pairs = typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
-        d.config = { mode, khishti, pairs };
+        const game: GameKind = msg.config.game === "bura" ? "bura" : msg.config.game === "joker" ? "joker" : d.config.game ?? "joker";
+        // Bura is always played in pairs.
+        const pairs = game === "bura" ? true : typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
+        d.config = { mode, khishti, pairs, game };
         break;
       }
       case "seat": {
@@ -434,7 +454,8 @@ export class RoomCore {
         this.requireHost(playerId);
         if (d.status !== "lobby") throw new RuleError("The game has started");
         for (let i = 0; i < SEATS; i++) if (!d.seats[i]) d.seats[i] = { playerId: null, name: BOT_NAMES[i] };
-        d.game = newGame(d.config, Math.floor(Math.random() * 2 ** 31));
+        const seed = Math.floor(Math.random() * 2 ** 31);
+        d.game = d.config.game === "bura" ? newBura(seed) : newGame(d.config, seed);
         d.status = "playing";
         break;
       }
@@ -472,6 +493,7 @@ export class RoomCore {
       case "play": {
         if (d.status !== "playing" || !d.game) throw new RuleError("No game in progress");
         if (seat === null) throw new RuleError("You are watching this game");
+        if (isBuraGame(d.game)) throw new RuleError("Unknown message");
         this.comeBack(seat);
         const action: BotAction =
           msg.t === "trump"
@@ -480,6 +502,15 @@ export class RoomCore {
               ? { t: "bid", bid: Number(msg.bid) }
               : { t: "play", cardId: String(msg.cardId), joker: msg.joker };
         d.game = applyAction(d.game, seat, action);
+        if (d.game.phase === "gameOver") await this.finishGame();
+        break;
+      }
+      case "bura": {
+        if (d.status !== "playing" || !isBuraGame(d.game)) throw new RuleError("No game in progress");
+        if (seat === null) throw new RuleError("You are watching this game");
+        if (!msg.action || typeof msg.action !== "object" || msg.action.t === "next") throw new RuleError("Bad move");
+        this.comeBack(seat);
+        d.game = applyBura(d.game, seat, msg.action);
         if (d.game.phase === "gameOver") await this.finishGame();
         break;
       }
@@ -495,8 +526,14 @@ export class RoomCore {
     const d = this.data!;
     const g = d.game;
     if (d.status !== "playing" || !g || g.phase === "gameOver") return null;
+    if (isBuraGame(g)) {
+      const auto = buraAutoDelay(g);
+      if (auto !== null) return Date.now() + (envDelay >= 0 ? envDelay : auto);
+    }
     const seat = d.seats[g.turn];
-    const justFinishedTrick = g.phase === "playing" && g.trick.length === 0 && g.lastTrick !== null;
+    const justFinishedTrick = isBuraGame(g)
+      ? g.trick === null && g.lastTrick !== null && !g.raise
+      : g.phase === "playing" && g.trick.length === 0 && g.lastTrick !== null;
     const extra = justFinishedTrick ? AFTER_TRICK_DELAY : 0;
     if (!seat || seat.playerId === null || seat.afkKickAt) return Date.now() + BOT_DELAY + extra;
     return Date.now() + TURN_MS + extra;
@@ -564,6 +601,7 @@ export class RoomCore {
   private turnKey(): string {
     const g = this.data!.game;
     if (!g) return "";
+    if (isBuraGame(g)) return `${g.round}:${g.step}:${g.phase}:${g.turn}`;
     return `${g.dealsPlayed}:${g.phase}:${g.turn}:${g.trick.length}:${g.hands[g.turn]?.length ?? 0}`;
   }
 
@@ -606,6 +644,17 @@ export class RoomCore {
         return;
       }
       const g = d.game;
+      if (isBuraGame(g) && buraActor(g) === null) {
+        // Round result shown long enough: deal the next round.
+        try {
+          d.game = applyBura(g, -1, { t: "next" });
+        } catch (e) {
+          console.error("next round failed", e);
+        }
+        d.deadline = null;
+        await this.afterChange();
+        return;
+      }
       const seat = g.turn;
       const s = d.seats[seat];
       if (s && s.playerId !== null && !s.afkKickAt) {
@@ -622,7 +671,7 @@ export class RoomCore {
         await this.goAfk(seat);
       }
       try {
-        d.game = applyAction(g, seat, botAction(g, seat));
+        d.game = isBuraGame(g) ? applyBura(g, seat, buraBot(g, seat)) : applyAction(g, seat, botAction(g, seat));
       } catch (e) {
         console.error("auto play failed", e);
       }
@@ -697,8 +746,11 @@ export class RoomCore {
             }
           : null,
       ),
-      game: g
+      game: isBuraGame(g)
+        ? buraView(g, you)
+        : g
         ? {
+            kind: "joker" as const,
             phase: g.phase,
             schedule: g.schedule,
             pulka: g.pulka,

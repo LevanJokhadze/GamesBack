@@ -46,8 +46,8 @@ export class Room extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/init" && request.method === "POST") {
-      const { code } = (await request.json()) as { code: string };
-      if (!(await this.core.init(code))) return new Response("exists", { status: 409 });
+      const { code, game } = (await request.json()) as { code: string; game?: string };
+      if (!(await this.core.init(code, game === "bura" ? "bura" : "joker"))) return new Response("exists", { status: 409 });
       return Response.json({ code });
     }
     if (url.pathname === "/info") {

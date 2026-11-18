@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Conn, RoomCore, RoomHost, peerOf } from "../src/room-core";
 
 function fakeConn(sent: any[]): Conn {
@@ -145,6 +145,59 @@ describe("players who stop responding", () => {
       expect(view().chat.some((m: any) => m.sys?.kind === "kicked" && m.sys.penalty === 25)).toBe(true);
       expect(view().status).toBe("playing");
       expect(seatOf("nick_" + uid2)).toBe(seat2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("bura rooms", () => {
+  it("plays a whole Bura match in pairs with bots and rates it as mode bura", async () => {
+    vi.useFakeTimers();
+    try {
+      const { buraBot } = await import("../src/bura");
+      const conns: Conn[] = [];
+      let rated: any = null;
+      const host: RoomHost = {
+        connections: () => conns,
+        persist: async () => {},
+        setTimer: async () => {},
+        resolveUser: async (token) => ({ id: token, name: `nick_${token}`, avatarUrl: null, rating: 1500 }),
+        rateGame: async (g) => {
+          rated = g;
+          return { matchId: "m1", changes: [null, null, null, null] };
+        },
+      };
+      const room = new RoomCore(host, null);
+      await room.init("BURAX", "bura");
+      expect(room.data!.config).toMatchObject({ game: "bura", pairs: true });
+      const sent: any[] = [];
+      const c = fakeConn(sent);
+      conns.push(c);
+      await room.onMessage(c, JSON.stringify({ t: "hello", token: "a" }));
+      // Pairs can't be switched off for Bura.
+      await room.onMessage(c, JSON.stringify({ t: "config", config: { pairs: false } }));
+      expect(room.data!.config.pairs).toBe(true);
+      await room.onMessage(c, JSON.stringify({ t: "start" }));
+      const last = () => [...sent].reverse().find((m) => m.t === "state")?.room;
+      expect(last().game.kind).toBe("bura");
+      expect(last().game.hand).toHaveLength(5);
+      // Other players' hands never reach this player.
+      expect(JSON.stringify(last()).match(/"hand":/g)).toHaveLength(1);
+      for (let i = 0; i < 5000 && room.data!.status === "playing"; i++) {
+        const g: any = room.data!.game;
+        if (g.phase === "playing" && g.turn === 0) {
+          await room.onMessage(c, JSON.stringify({ t: "bura", action: buraBot(g, 0) }));
+        } else {
+          vi.setSystemTime(Date.now() + 10_000);
+          await room.onTimer();
+        }
+      }
+      expect(room.data!.status).toBe("finished");
+      expect(rated).toMatchObject({ mode: "bura", pairs: true });
+      expect(Math.max(...rated.totals)).toBeGreaterThanOrEqual(11);
+      expect(rated.totals[0]).toBe(rated.totals[2]);
+      expect(sent.some((m) => m.t === "error")).toBe(false);
     } finally {
       vi.useRealTimers();
     }

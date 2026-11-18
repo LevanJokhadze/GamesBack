@@ -159,13 +159,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   }
   if (url.pathname === "/api/rooms" && req.method === "POST") {
     if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
+    const body = await readJson(req, 4096).catch(() => ({}) as Record<string, unknown>);
+    const game = body.game === "bura" ? "bura" : "joker";
     let code = "";
     do {
       code = Array.from({ length: 5 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join("");
     } while (rooms.has(code));
     const entry = makeRoom(code);
     rooms.set(code, entry);
-    await entry.core.init(code);
+    await entry.core.init(code, game);
     return send(req, res, 201, { code });
   }
   if (url.pathname === "/api/register" && req.method === "POST") {

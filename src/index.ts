@@ -47,12 +47,14 @@ export default {
 
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       if (!originAllowed(request, env)) return json({ error: "origin not allowed" }, 403);
+      const body = (await request.json().catch(() => ({}))) as { game?: string };
+      const game = body?.game === "bura" ? "bura" : "joker";
       for (let attempt = 0; attempt < 6; attempt++) {
         const code = randomCode();
         const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
         const res = await stub.fetch("https://room/init", {
           method: "POST",
-          body: JSON.stringify({ code }),
+          body: JSON.stringify({ code, game }),
         });
         if (res.ok) return json({ code }, 201);
       }
