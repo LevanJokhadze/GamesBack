@@ -79,6 +79,7 @@ function makeRoom(code: string): RoomEntry {
         return u ? userInfo(u) : null;
       },
       rateGame: (game) => store.rateGame(game),
+      penalize: (userId, amount, reason, code) => store.penalize(userId, amount, reason, code),
       setTimer: async (at) => {
         clearTimeout(entry.timer);
         entry.timer = setTimeout(() => run(entry, () => entry.core.onTimer()), Math.max(0, at - Date.now()));

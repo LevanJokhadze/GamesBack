@@ -56,6 +56,11 @@ function suite(name: string, make: () => Store) {
       expect((await s.login(a.user.nickname, "newpass1")).user.id).toBe(a.user.id);
       await expect(s.register({ nickname: "short_" + run, firstName: "X", lastName: "Y", avatar: parseAvatar(PNG), password: "123" })).rejects.toThrow(/Password/);
 
+      // Rating penalty for leaving a match.
+      const before = (await s.userById(a.user.id))!.rating;
+      expect(await s.penalize(a.user.id, 5, "afk", "ABCDE")).toBe(before - 5);
+      expect((await s.userById(a.user.id))!.rating).toBe(before - 5);
+
       const up = await s.updateProfile(a.user.id, { firstName: "Levani", nickname: "levani" + run, avatar: parseAvatar(PNG), password: "secret123" });
       expect(up.firstName).toBe("Levani");
       expect(up.nickname).toBe("levani" + run);

@@ -98,6 +98,8 @@ export interface Store {
   recentGames(id: string, limit: number, before?: string): Promise<GameRecord[]>;
   match(id: string): Promise<Match | null>;
   rateGame(game: FinishedGame): Promise<{ matchId: string; changes: (RatingChange | null)[] }>;
+  /** Takes rating points for leaving or not responding; returns the new rating. */
+  penalize(userId: string, amount: number, reason: string, roomCode: string): Promise<number | null>;
 }
 
 // ---------- validation helpers ----------
@@ -336,6 +338,13 @@ export class MemoryStore implements Store {
     };
   }
 
+  async penalize(userId: string, amount: number) {
+    const u = this.users.get(userId);
+    if (!u) return null;
+    u.rating -= amount;
+    return u.rating;
+  }
+
   async rateGame(game: FinishedGame) {
     const users = new Map<string, User>();
     for (const id of game.userIds) if (id && this.users.has(id)) users.set(id, this.users.get(id)!);
@@ -384,6 +393,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_seen timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions (user_id);
+CREATE TABLE IF NOT EXISTS rating_penalties (
+  id bigserial PRIMARY KEY,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount int NOT NULL,
+  reason text NOT NULL,
+  room_code text NOT NULL,
+  at timestamptz NOT NULL DEFAULT now()
+);
 CREATE INDEX IF NOT EXISTS users_rating_idx ON users (rating DESC) WHERE games > 0;
 CREATE TABLE IF NOT EXISTS games (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -588,6 +605,16 @@ export class PgStore implements Store {
         ratingAfter: x.rating_after === null ? null : Number(x.rating_after),
       })),
     };
+  }
+
+  async penalize(userId: string, amount: number, reason: string, roomCode: string) {
+    if (!UUID_RE.test(userId)) return null;
+    const { rows } = await this.pool.query(
+      `WITH p AS (INSERT INTO rating_penalties (user_id, amount, reason, room_code) VALUES ($1, $2, $3, $4))
+       UPDATE users SET rating = rating - $2 WHERE id = $1 RETURNING rating`,
+      [userId, amount, reason, roomCode],
+    );
+    return rows[0] ? Number(rows[0].rating) : null;
   }
 
   async rateGame(game: FinishedGame) {
