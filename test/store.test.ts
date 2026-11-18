@@ -9,9 +9,10 @@ function suite(name: string, make: () => Store) {
     it("registers, rates a game and ranks players", async () => {
       const s = make();
       await s.init();
-      const a = await s.register({ nickname: "levan_j", firstName: "Levan", lastName: "Jokhadze", avatar: parseAvatar(PNG) });
-      const b = await s.register({ nickname: "ნიკა", firstName: "Nika", lastName: "Test", avatar: parseAvatar(PNG) });
-      await expect(s.register({ nickname: "LEVAN_J", firstName: "X", lastName: "Y", avatar: parseAvatar(PNG) })).rejects.toThrow(/taken/);
+      const run = Math.random().toString(36).slice(2, 7);
+      const a = await s.register({ nickname: "levan_j" + run, firstName: "Levan", lastName: "Jokhadze", avatar: parseAvatar(PNG) });
+      const b = await s.register({ nickname: "ნიკა" + run, firstName: "Nika", lastName: "Test", avatar: parseAvatar(PNG) });
+      await expect(s.register({ nickname: ("levan_j" + run).toUpperCase(), firstName: "X", lastName: "Y", avatar: parseAvatar(PNG) })).rejects.toThrow(/taken/);
       await expect(s.register({ nickname: "a b", firstName: "X", lastName: "Y", avatar: parseAvatar(PNG) })).rejects.toThrow(/Nickname/);
       expect(a.user.rating).toBe(1500);
       expect((await s.userByToken(a.token))?.id).toBe(a.user.id);
@@ -40,9 +41,9 @@ function suite(name: string, make: () => Store) {
       expect(m.players[1]).toMatchObject({ bot: true, ratingAfter: null });
       expect(m.pulkas).toEqual([{ deals: [], total: [1, 2, 3, 4] }]);
 
-      const up = await s.updateProfile(a.user.id, { firstName: "Levani", nickname: "levani", avatar: parseAvatar(PNG) });
+      const up = await s.updateProfile(a.user.id, { firstName: "Levani", nickname: "levani" + run, avatar: parseAvatar(PNG) });
       expect(up.firstName).toBe("Levani");
-      expect(up.nickname).toBe("levani");
+      expect(up.nickname).toBe("levani" + run);
       expect(up.avatarVersion).toBe(2);
       expect((await s.avatar(a.user.id))?.type).toBe("image/png");
     });
