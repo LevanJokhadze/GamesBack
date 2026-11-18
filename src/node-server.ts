@@ -6,7 +6,8 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { randomInt } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
-import { Conn, RoomCore } from "./room-core";
+import { Conn, RoomCore, UserInfo } from "./room-core";
+import { InputError, User, makeStore, parseAvatar } from "./store";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const ALLOWED = (process.env.ALLOWED_ORIGINS ?? "*").split(",").map((s) => s.trim()).filter(Boolean);
@@ -22,6 +23,31 @@ interface RoomEntry {
 }
 
 const rooms = new Map<string, RoomEntry>();
+const store = makeStore();
+/** Public URL prefix for avatars (absolute so other origins can load them). */
+const PUBLIC_URL = (process.env.PUBLIC_URL ?? "").replace(/\/$/, "");
+
+function avatarUrl(u: User): string {
+  return `${PUBLIC_URL}/api/users/${u.id}/avatar?v=${u.avatarVersion}`;
+}
+
+function userInfo(u: User): UserInfo {
+  return { id: u.id, name: u.nickname, avatarUrl: avatarUrl(u), rating: u.rating };
+}
+
+function publicUser(u: User) {
+  return {
+    id: u.id,
+    nickname: u.nickname,
+    firstName: u.firstName,
+    lastName: u.lastName,
+    rating: u.rating,
+    games: u.games,
+    wins: u.wins,
+    peak: u.peak,
+    avatarUrl: avatarUrl(u),
+  };
+}
 const playerIds = new WeakMap<WebSocket, string | null>();
 
 function wrap(ws: WebSocket): Conn {
@@ -48,6 +74,11 @@ function makeRoom(code: string): RoomEntry {
           rooms.delete(code);
         }
       },
+      resolveUser: async (token) => {
+        const u = await store.userByToken(token);
+        return u ? userInfo(u) : null;
+      },
+      rateGame: (game) => store.rateGame(game),
       setTimer: async (at) => {
         clearTimeout(entry.timer);
         entry.timer = setTimeout(() => run(entry, () => entry.core.onTimer()), Math.max(0, at - Date.now()));
@@ -67,15 +98,43 @@ function send(req: IncomingMessage, res: ServerResponse, status: number, body: u
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (origin && originOk(origin)) {
     headers["Access-Control-Allow-Origin"] = origin;
-    headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS";
-    headers["Access-Control-Allow-Headers"] = "Content-Type";
+    headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,OPTIONS";
+    headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
     headers["Vary"] = "Origin";
   }
   res.writeHead(status, headers);
   res.end(body === null ? undefined : JSON.stringify(body));
 }
 
-const server = createServer(async (req, res) => {
+async function readJson(req: IncomingMessage, limit = 600 * 1024): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > limit) throw new InputError("Request too large");
+    chunks.push(c as Buffer);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+  } catch {
+    throw new InputError("Bad JSON");
+  }
+}
+
+async function authUser(req: IncomingMessage): Promise<User | null> {
+  const m = (req.headers.authorization ?? "").match(/^Bearer (\S{20,128})$/);
+  return m ? store.userByToken(m[1]) : null;
+}
+
+const server = createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    if (e instanceof InputError) return send(req, res, 400, { error: e.message });
+    console.error(e);
+    send(req, res, 500, { error: "server error" });
+  });
+});
+
+async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const url = new URL(req.url ?? "/", "http://x");
   if (req.method === "OPTIONS") return send(req, res, 204, null);
   if (url.pathname === "/" || url.pathname === "/api/health") {
@@ -92,13 +151,75 @@ const server = createServer(async (req, res) => {
     await entry.core.init(code);
     return send(req, res, 201, { code });
   }
+  if (url.pathname === "/api/register" && req.method === "POST") {
+    if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
+    const body = await readJson(req);
+    const { token, user } = await store.register({
+      nickname: String(body.nickname ?? ""),
+      firstName: String(body.firstName ?? ""),
+      lastName: String(body.lastName ?? ""),
+      avatar: parseAvatar(body.avatar),
+    });
+    return send(req, res, 201, { token, user: publicUser(user) });
+  }
+  if (url.pathname === "/api/me") {
+    const me = await authUser(req);
+    if (!me) return send(req, res, 401, { error: "not registered" });
+    if (req.method === "PUT") {
+      if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
+      const body = await readJson(req);
+      const updated = await store.updateProfile(me.id, {
+        nickname: body.nickname === undefined ? undefined : String(body.nickname),
+        firstName: body.firstName === undefined ? undefined : String(body.firstName),
+        lastName: body.lastName === undefined ? undefined : String(body.lastName),
+        avatar: body.avatar ? parseAvatar(body.avatar) : undefined,
+      });
+      return send(req, res, 200, { user: publicUser(updated) });
+    }
+    return send(req, res, 200, { user: publicUser(me) });
+  }
+  if (url.pathname === "/api/leaderboard") {
+    const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") ?? 100) || 100));
+    const rows = await store.leaderboard(limit);
+    return send(req, res, 200, { players: rows.map((u) => ({ ...publicUser(u), rank: u.rank })) });
+  }
+  const av = url.pathname.match(/^\/api\/users\/([0-9a-f-]{36})\/avatar$/i);
+  if (av) {
+    const a = await store.avatar(av[1]);
+    if (!a) return send(req, res, 404, { error: "not found" });
+    res.writeHead(200, {
+      "Content-Type": a.type,
+      "Content-Length": a.data.length,
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Access-Control-Allow-Origin": "*",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.end(a.data);
+    return;
+  }
+  const up = url.pathname.match(/^\/api\/users\/([0-9a-f-]{36})$/i);
+  if (up) {
+    const u = await store.userById(up[1]);
+    if (!u) return send(req, res, 404, { error: "not found" });
+    return send(req, res, 200, { user: publicUser(u), games: await store.recentGames(u.id, 20) });
+  }
+  const ug = url.pathname.match(/^\/api\/users\/([0-9a-f-]{36})\/games$/i);
+  if (ug) {
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit") ?? 20) || 20));
+    return send(req, res, 200, { games: await store.recentGames(ug[1], limit, url.searchParams.get("before") ?? undefined) });
+  }
+  const gm = url.pathname.match(/^\/api\/games\/([0-9a-f-]{36})$/i);
+  if (gm) {
+    const m = await store.match(gm[1]);
+    return m ? send(req, res, 200, { match: m }) : send(req, res, 404, { error: "not found" });
+  }
   const m = url.pathname.match(/^\/api\/rooms\/([A-Za-z0-9]+)$/);
   if (m) {
     const info = rooms.get(m[1].toUpperCase())?.core.info();
     return info ? send(req, res, 200, info) : send(req, res, 404, { error: "room not found" });
   }
   send(req, res, 404, { error: "not found" });
-});
+}
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
 
@@ -132,4 +253,10 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
-server.listen(PORT, () => console.log(`joker-backend listening on :${PORT}`));
+store
+  .init()
+  .then(() => server.listen(PORT, () => console.log(`joker-backend listening on :${PORT} (${process.env.DATABASE_URL ? "postgres" : "memory store"})`)))
+  .catch((e) => {
+    console.error("database init failed", e);
+    process.exit(1);
+  });

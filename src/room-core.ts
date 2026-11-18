@@ -34,11 +34,48 @@ export interface RoomHost {
   persist(data: RoomData | null): Promise<void>;
   /** Ask for onTimer() to be called at this time (replaces any earlier request). */
   setTimer(at: number): Promise<void>;
+  /**
+   * Accounts (optional). When present, players must send a valid account token
+   * in "hello", and finished games are rated.
+   */
+  resolveUser?(token: string): Promise<UserInfo | null>;
+  rateGame?(game: FinishedGame): Promise<{ matchId: string; changes: (RatingChange | null)[] }>;
+}
+
+export interface UserInfo {
+  id: string;
+  name: string;
+  avatarUrl: string | null;
+  rating: number;
+}
+
+export interface FinishedGame {
+  code: string;
+  mode: string;
+  khishti: number;
+  /** Played in pairs (seats 0 & 2 against 1 & 3). */
+  pairs: boolean;
+  /** userId per seat, null for bots. */
+  userIds: (string | null)[];
+  /** Display name per seat at the time of the game. */
+  names: string[];
+  totals: number[];
+  /** Full per-deal results, for the match summary. */
+  pulkas: unknown[];
+}
+
+export interface RatingChange {
+  before: number;
+  after: number;
+  delta: number;
 }
 
 interface Seat {
   playerId: string | null; // null = bot
   name: string;
+  userId?: string | null;
+  avatarUrl?: string | null;
+  rating?: number | null;
 }
 
 interface ChatLine {
@@ -62,10 +99,13 @@ export interface RoomData {
   chat: ChatLine[];
   /** Identifies whose turn the deadline was computed for. */
   turnKey?: string;
+  /** Rating changes of the last finished game, per seat. */
+  ratingChanges?: (RatingChange | null)[] | null;
+  matchId?: string | null;
 }
 
 type ClientMsg =
-  | { t: "hello"; playerId: string; name: string }
+  | { t: "hello"; playerId?: string; name?: string; token?: string }
   | { t: "start" }
   | { t: "config"; config: Partial<GameConfig> }
   | { t: "seat"; seat: number }
@@ -79,8 +119,10 @@ type ClientMsg =
   | { t: "ping" };
 
 const BOT_NAMES = ["Bot Nino", "Bot Gio", "Bot Tamo", "Bot Luka"];
-const BOT_DELAY = 750;
-const AFTER_TRICK_DELAY = 1600;
+// BOT_DELAY_MS lets tests run whole games quickly (Node only).
+const envDelay = Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.BOT_DELAY_MS);
+const BOT_DELAY = envDelay >= 0 ? envDelay : 750;
+const AFTER_TRICK_DELAY = envDelay >= 0 ? envDelay : 1600;
 const HUMAN_TURN_MS = 60_000;
 const DISCONNECTED_TURN_MS = 12_000;
 const IDLE_CLEANUP_MS = 12 * 60 * 60 * 1000;
@@ -149,7 +191,7 @@ export class RoomCore {
         return;
       }
       if (msg.t === "hello") {
-        await this.onHello(ws, msg.playerId, msg.name);
+        await this.onHello(ws, msg);
         return;
       }
       if (!playerId) return this.sendError(ws, "Say hello first");
@@ -188,23 +230,63 @@ export class RoomCore {
     return ids;
   }
 
-  private async onHello(ws: Conn, playerIdRaw: string, nameRaw: string): Promise<void> {
+  private async onHello(ws: Conn, msg: { playerId?: string; name?: string; token?: string }): Promise<void> {
     const d = this.data!;
-    const playerId = String(playerIdRaw ?? "").slice(0, 64);
-    if (!/^[A-Za-z0-9_-]{8,64}$/.test(playerId)) throw new RuleError("Bad player id");
-    const name = cleanName(nameRaw);
+    let playerId: string;
+    let profile: Omit<Seat, "playerId">;
+    if (this.host.resolveUser) {
+      const user = msg.token ? await this.host.resolveUser(String(msg.token).slice(0, 128)) : null;
+      if (!user) {
+        ws.send(JSON.stringify({ t: "error", code: "auth", message: "Please register first" }));
+        return;
+      }
+      playerId = `u_${user.id}`;
+      profile = { name: user.name, userId: user.id, avatarUrl: user.avatarUrl, rating: user.rating };
+    } else {
+      playerId = String(msg.playerId ?? "").slice(0, 64);
+      if (!/^[A-Za-z0-9_-]{8,64}$/.test(playerId)) throw new RuleError("Bad player id");
+      profile = { name: cleanName(msg.name) };
+    }
     ws.setPlayerId(playerId);
     let seat = this.seatOf(playerId);
     if (seat === null && d.status === "lobby") {
       const free = d.seats.findIndex((s) => s === null);
       if (free >= 0) {
-        d.seats[free] = { playerId, name };
+        d.seats[free] = { playerId, ...profile };
         seat = free;
       }
     }
-    if (seat !== null) d.seats[seat]!.name = name;
+    if (seat !== null) Object.assign(d.seats[seat]!, profile);
     if (!d.hostId || (d.hostId && this.seatOf(d.hostId) === null && seat !== null)) d.hostId = playerId;
     await this.afterChange();
+  }
+
+  /** Called once when a game reaches its end: rate it if accounts are enabled. */
+  private async finishGame(): Promise<void> {
+    const d = this.data!;
+    d.status = "finished";
+    d.ratingChanges = null;
+    d.matchId = null;
+    if (!this.host.rateGame || !d.game) return;
+    try {
+      const changes = await this.host.rateGame({
+        code: d.code,
+        mode: d.config.mode,
+        khishti: d.config.khishti,
+        pairs: Boolean(d.config.pairs),
+        userIds: d.seats.map((s) => s?.userId ?? null),
+        names: d.seats.map((s, i) => s?.name ?? `#${i + 1}`),
+        totals: d.game.totals.slice(),
+        pulkas: d.game.pulkas,
+      });
+      d.ratingChanges = changes.changes;
+      d.matchId = changes.matchId;
+      changes.changes.forEach((c, i) => {
+        if (c && d.seats[i]) d.seats[i]!.rating = c.after;
+      });
+    } catch (e) {
+      console.error("rating failed", e);
+    }
   }
 
   private requireHost(playerId: string): void {
@@ -221,7 +303,8 @@ export class RoomCore {
         const mode = msg.config.mode === "nines" ? "nines" : msg.config.mode === "standard" ? "standard" : d.config.mode;
         const kh = Number(msg.config.khishti);
         const khishti = KHISHTI_OPTIONS.includes(kh) ? kh : d.config.khishti;
-        d.config = { mode, khishti };
+        const pairs = typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
+        d.config = { mode, khishti, pairs };
         break;
       }
       case "seat": {
@@ -263,6 +346,8 @@ export class RoomCore {
         if (d.status !== "finished") throw new RuleError("The game is not over");
         d.status = "lobby";
         d.game = null;
+        d.ratingChanges = null;
+        d.matchId = null;
         // Free the seats of players who left; keep bots and connected people.
         const online = this.connectedIds();
         d.seats = d.seats.map((s) => (s && (s.playerId === null || online.has(s.playerId)) ? s : null));
@@ -288,7 +373,7 @@ export class RoomCore {
               ? { t: "bid", bid: Number(msg.bid) }
               : { t: "play", cardId: String(msg.cardId), joker: msg.joker };
         d.game = applyAction(d.game, seat, action);
-        if (d.game.phase === "gameOver") d.status = "finished";
+        if (d.game.phase === "gameOver") await this.finishGame();
         break;
       }
       default:
@@ -349,7 +434,7 @@ export class RoomCore {
       } catch (e) {
         console.error("auto play failed", e);
       }
-      if (d.game.phase === "gameOver") d.status = "finished";
+      if (d.game.phase === "gameOver") await this.finishGame();
       d.deadline = null;
       await this.afterChange();
       return;
@@ -391,10 +476,16 @@ export class RoomCore {
       deadline: d.deadline,
       serverTime: Date.now(),
       chat: d.chat.slice(-30),
+      ratingChanges: d.ratingChanges ?? null,
+      matchId: d.matchId ?? null,
+      accounts: Boolean(this.host.resolveUser),
       seats: d.seats.map((s, i) =>
         s
           ? {
               name: s.name,
+              avatarUrl: s.avatarUrl ?? null,
+              rating: s.rating ?? null,
+              userId: s.userId ?? null,
               bot: s.playerId === null,
               connected: s.playerId === null || online.has(s.playerId),
               host: s.playerId !== null && s.playerId === d.hostId,
