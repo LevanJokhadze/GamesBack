@@ -29,7 +29,7 @@ function suite(name: string, make: () => Store) {
 
       const me = await s.userById(a.user.id);
       expect(me).toMatchObject({ games: 1, wins: 1, rating: changes[0]!.after });
-      const lb = await s.leaderboard(10);
+      const lb = await s.leaderboard(1000);
       const mine = lb.find((u) => u.id === a.user.id)!;
       expect(mine.rank).toBeLessThan(lb.find((u) => u.id === b.user.id)!.rank);
       const games = await s.recentGames(a.user.id, 5);
