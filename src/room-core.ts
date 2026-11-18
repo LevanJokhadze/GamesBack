@@ -115,6 +115,9 @@ type ClientMsg =
   | { t: "bid"; bid: number }
   | { t: "play"; cardId: string; joker?: JokerMode }
   | { t: "chat"; text: string }
+  | { t: "rtc"; to: string; data: unknown }
+  | { t: "voice"; on: boolean }
+  | { t: "talk"; on: boolean }
   | { t: "rematch" }
   | { t: "ping" };
 
@@ -133,7 +136,32 @@ function cleanName(name: unknown): string {
   return n || "Player";
 }
 
+/**
+ * Public id of a connected person, used for chat, the people list and voice-call signalling.
+ * Derived from the private player id so clients never see each other's player ids.
+ */
+export function peerOf(playerId: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  for (let i = 0; i < playerId.length; i++) {
+    const c = playerId.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ c, 0x5bd1e995);
+  }
+  return ((h1 >>> 0).toString(36) + (h2 >>> 0).toString(36)).slice(0, 12);
+}
+
+interface Person {
+  name: string;
+  avatarUrl: string | null;
+  /** Joined the voice chat. */
+  voice: boolean;
+  lastChat: number;
+}
+
 export class RoomCore {
+  /** Who is connected (players and spectators); in memory only. */
+  private people = new Map<string, Person>();
 
   constructor(private host: RoomHost, public data: RoomData | null) {}
 
@@ -195,6 +223,14 @@ export class RoomCore {
         return;
       }
       if (!playerId) return this.sendError(ws, "Say hello first");
+      if (msg.t === "rtc") return this.relayRtc(playerId, msg, raw.length);
+      if (msg.t === "talk") return this.relayTalk(playerId, Boolean(msg.on));
+      if (msg.t === "voice") {
+        const p = this.people.get(playerId);
+        if (p) p.voice = Boolean(msg.on);
+        this.broadcast();
+        return;
+      }
       await this.onAction(playerId, msg);
     } catch (e) {
       if (e instanceof RuleError) return this.sendError(ws, e.message);
@@ -204,8 +240,42 @@ export class RoomCore {
   }
 
   async onClose(ws: Conn): Promise<void> {
+    const id = ws.getPlayerId();
     ws.setPlayerId(null);
+    if (id && !this.connectedIds().has(id)) this.people.delete(id);
     if (this.data) await this.afterChange();
+  }
+
+  /** Forwards a WebRTC offer/answer/candidate to one person; the server never looks inside. */
+  private relayRtc(playerId: string, msg: { to: string; data: unknown }, size: number): void {
+    if (size > 20_000) return;
+    const from = peerOf(playerId);
+    const out = JSON.stringify({ t: "rtc", from, data: msg.data });
+    for (const ws of this.host.connections()) {
+      const id = ws.getPlayerId();
+      if (id && id !== playerId && peerOf(id) === msg.to) {
+        try {
+          ws.send(out);
+        } catch {
+          /* closed */
+        }
+      }
+    }
+  }
+
+  /** Tells everyone else who is talking right now (push-to-talk). */
+  private relayTalk(playerId: string, on: boolean): void {
+    const out = JSON.stringify({ t: "talk", peer: peerOf(playerId), on });
+    for (const ws of this.host.connections()) {
+      const id = ws.getPlayerId();
+      if (id && id !== playerId) {
+        try {
+          ws.send(out);
+        } catch {
+          /* closed */
+        }
+      }
+    }
   }
 
   private sendError(ws: Conn, message: string): void {
@@ -248,6 +318,8 @@ export class RoomCore {
       profile = { name: cleanName(msg.name) };
     }
     ws.setPlayerId(playerId);
+    const prev = this.people.get(playerId);
+    this.people.set(playerId, { name: profile.name, avatarUrl: profile.avatarUrl ?? null, voice: prev?.voice ?? false, lastChat: prev?.lastChat ?? 0 });
     let seat = this.seatOf(playerId);
     if (seat === null && d.status === "lobby") {
       const free = d.seats.findIndex((s) => s === null);
@@ -356,7 +428,12 @@ export class RoomCore {
       case "chat": {
         const text = String(msg.text ?? "").replace(/[\u0000-\u001f]/g, " ").trim().slice(0, 200);
         if (!text) return;
-        const name = seat !== null ? d.seats[seat]!.name : "Guest";
+        const person = this.people.get(playerId);
+        if (person) {
+          if (Date.now() - person.lastChat < 400) throw new RuleError("Slow down");
+          person.lastChat = Date.now();
+        }
+        const name = seat !== null ? d.seats[seat]!.name : person?.name ?? "Guest";
         d.chat.push({ seat, name, text, at: Date.now() });
         if (d.chat.length > 40) d.chat = d.chat.slice(-40);
         break;
@@ -476,6 +553,13 @@ export class RoomCore {
       deadline: d.deadline,
       serverTime: Date.now(),
       chat: d.chat.slice(-30),
+      /** Your public id (matches `people[].peer`). */
+      peer: peerOf(playerId),
+      /** Everyone connected right now, players and spectators. */
+      people: [...online].map((id) => {
+        const p = this.people.get(id);
+        return { peer: peerOf(id), name: p?.name ?? "Guest", avatarUrl: p?.avatarUrl ?? null, seat: this.seatOf(id), voice: p?.voice ?? false };
+      }),
       ratingChanges: d.ratingChanges ?? null,
       matchId: d.matchId ?? null,
       accounts: Boolean(this.host.resolveUser),
