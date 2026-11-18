@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "joker-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-11-01",
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "vars": {
+    // Comma-separated list of frontend origins allowed to connect, e.g.
+    // "https://joker.example.com,http://localhost:5173". "*" allows any origin.
+    "ALLOWED_ORIGINS": "*"
+  }
+  // To serve the API on your own subdomain, uncomment and edit:
+  // "routes": [{ "pattern": "joker-api.example.com", "custom_domain": true }]
+}
