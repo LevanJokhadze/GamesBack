@@ -8,6 +8,7 @@ import type { FinishedGame, RatingChange } from "./room-core";
 
 export interface User {
   id: string;
+  nickname: string;
   firstName: string;
   lastName: string;
   rating: number;
@@ -35,12 +36,28 @@ export interface GameRecord {
 
 export class InputError extends Error {}
 
+export interface ProfilePatch {
+  nickname?: string;
+  firstName?: string;
+  lastName?: string;
+  avatar?: Avatar;
+}
+
+/** 3-20 letters (Latin or Georgian), digits, "_" or "."; unique ignoring case. */
+export function cleanNickname(v: unknown): string {
+  const s = String(v ?? "").trim();
+  if (!/^[A-Za-z0-9_.\u10D0-\u10FF]{3,20}$/.test(s)) {
+    throw new InputError("Nickname must be 3-20 letters, digits, _ or .");
+  }
+  return s;
+}
+
 export interface Store {
   init(): Promise<void>;
-  register(firstName: string, lastName: string, avatar: Avatar): Promise<{ token: string; user: User }>;
+  register(p: { nickname: string; firstName: string; lastName: string; avatar: Avatar }): Promise<{ token: string; user: User }>;
   userByToken(token: string): Promise<User | null>;
   userById(id: string): Promise<User | null>;
-  updateProfile(id: string, p: { firstName?: string; lastName?: string; avatar?: Avatar }): Promise<User>;
+  updateProfile(id: string, p: ProfilePatch): Promise<User>;
   avatar(id: string): Promise<Avatar | null>;
   leaderboard(limit: number): Promise<(User & { rank: number })[]>;
   recentGames(id: string, limit: number): Promise<GameRecord[]>;
@@ -111,10 +128,18 @@ export class MemoryStore implements Store {
 
   async init() {}
 
-  async register(firstName: string, lastName: string, avatar: Avatar) {
+  private nickTaken(nick: string, exceptId?: string): boolean {
+    for (const u of this.users.values()) if (u.id !== exceptId && u.nickname.toLowerCase() === nick.toLowerCase()) return true;
+    return false;
+  }
+
+  async register({ nickname, firstName, lastName, avatar }: { nickname: string; firstName: string; lastName: string; avatar: Avatar }) {
     const token = newToken();
+    const nick = cleanNickname(nickname);
+    if (this.nickTaken(nick)) throw new InputError("That nickname is taken");
     const user: User = {
       id: randomUUID(),
+      nickname: nick,
       firstName: cleanPersonName(firstName),
       lastName: cleanPersonName(lastName),
       rating: START_RATING,
@@ -144,9 +169,14 @@ export class MemoryStore implements Store {
     return u ? this.pub(u) : null;
   }
 
-  async updateProfile(id: string, p: { firstName?: string; lastName?: string; avatar?: Avatar }) {
+  async updateProfile(id: string, p: ProfilePatch) {
     const u = this.users.get(id);
     if (!u) throw new InputError("Unknown user");
+    if (p.nickname !== undefined) {
+      const nick = cleanNickname(p.nickname);
+      if (this.nickTaken(nick, id)) throw new InputError("That nickname is taken");
+      u.nickname = nick;
+    }
     if (p.firstName !== undefined) u.firstName = cleanPersonName(p.firstName);
     if (p.lastName !== undefined) u.lastName = cleanPersonName(p.lastName);
     if (p.avatar) {
@@ -212,6 +242,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   token_hash text NOT NULL UNIQUE,
+  nickname text NOT NULL,
   first_name text NOT NULL,
   last_name text NOT NULL,
   avatar bytea NOT NULL,
@@ -224,6 +255,7 @@ CREATE TABLE IF NOT EXISTS users (
   created_at timestamptz NOT NULL DEFAULT now(),
   last_seen timestamptz NOT NULL DEFAULT now()
 );
+CREATE UNIQUE INDEX IF NOT EXISTS users_nickname_idx ON users (lower(nickname));
 CREATE INDEX IF NOT EXISTS users_rating_idx ON users (rating DESC) WHERE games > 0;
 CREATE TABLE IF NOT EXISTS games (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -245,11 +277,12 @@ CREATE TABLE IF NOT EXISTS game_players (
 CREATE INDEX IF NOT EXISTS game_players_user_idx ON game_players (user_id, game_id);
 `;
 
-const USER_COLS = `id, first_name, last_name, rating, games, wins, peak, avatar_version, created_at`;
+const USER_COLS = `id, nickname, first_name, last_name, rating, games, wins, peak, avatar_version, created_at`;
 
 function rowToUser(r: Record<string, unknown>): User {
   return {
     id: String(r.id),
+    nickname: String(r.nickname),
     firstName: String(r.first_name),
     lastName: String(r.last_name),
     rating: Number(r.rating),
@@ -278,14 +311,18 @@ export class PgStore implements Store {
     await this.pool.query(SCHEMA);
   }
 
-  async register(firstName: string, lastName: string, avatar: Avatar) {
+  async register({ nickname, firstName, lastName, avatar }: { nickname: string; firstName: string; lastName: string; avatar: Avatar }) {
     const token = newToken();
-    const { rows } = await this.pool.query(
-      `INSERT INTO users (token_hash, first_name, last_name, avatar, avatar_type)
-       VALUES ($1, $2, $3, $4, $5) RETURNING ${USER_COLS}`,
-      [hashToken(token), cleanPersonName(firstName), cleanPersonName(lastName), avatar.data, avatar.type],
-    );
-    return { token, user: rowToUser(rows[0]) };
+    try {
+      const { rows } = await this.pool.query(
+        `INSERT INTO users (token_hash, nickname, first_name, last_name, avatar, avatar_type)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING ${USER_COLS}`,
+        [hashToken(token), cleanNickname(nickname), cleanPersonName(firstName), cleanPersonName(lastName), avatar.data, avatar.type],
+      );
+      return { token, user: rowToUser(rows[0]) };
+    } catch (e) {
+      throw nickConflict(e);
+    }
   }
 
   async userByToken(token: string) {
@@ -302,9 +339,12 @@ export class PgStore implements Store {
     return rows[0] ? rowToUser(rows[0]) : null;
   }
 
-  async updateProfile(id: string, p: { firstName?: string; lastName?: string; avatar?: Avatar }) {
-    const { rows } = await this.pool.query(
+  async updateProfile(id: string, p: ProfilePatch) {
+    let rows;
+    try {
+      ({ rows } = await this.pool.query(
       `UPDATE users SET
+         nickname = COALESCE($6, nickname),
          first_name = COALESCE($2, first_name),
          last_name = COALESCE($3, last_name),
          avatar = COALESCE($4, avatar),
@@ -317,8 +357,12 @@ export class PgStore implements Store {
         p.lastName !== undefined ? cleanPersonName(p.lastName) : null,
         p.avatar?.data ?? null,
         p.avatar?.type ?? null,
+        p.nickname !== undefined ? cleanNickname(p.nickname) : null,
       ],
-    );
+      ));
+    } catch (e) {
+      throw nickConflict(e);
+    }
     if (!rows[0]) throw new InputError("Unknown user");
     return rowToUser(rows[0]);
   }
@@ -395,6 +439,10 @@ export class PgStore implements Store {
       client.release();
     }
   }
+}
+
+function nickConflict(e: unknown): unknown {
+  return (e as { code?: string })?.code === "23505" ? new InputError("That nickname is taken") : e;
 }
 
 export function makeStore(): Store {

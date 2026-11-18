@@ -32,12 +32,13 @@ function avatarUrl(u: User): string {
 }
 
 function userInfo(u: User): UserInfo {
-  return { id: u.id, name: `${u.firstName} ${u.lastName}`, avatarUrl: avatarUrl(u), rating: u.rating };
+  return { id: u.id, name: u.nickname, avatarUrl: avatarUrl(u), rating: u.rating };
 }
 
 function publicUser(u: User) {
   return {
     id: u.id,
+    nickname: u.nickname,
     firstName: u.firstName,
     lastName: u.lastName,
     rating: u.rating,
@@ -153,7 +154,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (url.pathname === "/api/register" && req.method === "POST") {
     if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
     const body = await readJson(req);
-    const { token, user } = await store.register(String(body.firstName ?? ""), String(body.lastName ?? ""), parseAvatar(body.avatar));
+    const { token, user } = await store.register({
+      nickname: String(body.nickname ?? ""),
+      firstName: String(body.firstName ?? ""),
+      lastName: String(body.lastName ?? ""),
+      avatar: parseAvatar(body.avatar),
+    });
     return send(req, res, 201, { token, user: publicUser(user) });
   }
   if (url.pathname === "/api/me") {
@@ -163,6 +169,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
       if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
       const body = await readJson(req);
       const updated = await store.updateProfile(me.id, {
+        nickname: body.nickname === undefined ? undefined : String(body.nickname),
         firstName: body.firstName === undefined ? undefined : String(body.firstName),
         lastName: body.lastName === undefined ? undefined : String(body.lastName),
         avatar: body.avatar ? parseAvatar(body.avatar) : undefined,

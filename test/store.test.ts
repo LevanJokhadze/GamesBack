@@ -9,8 +9,10 @@ function suite(name: string, make: () => Store) {
     it("registers, rates a game and ranks players", async () => {
       const s = make();
       await s.init();
-      const a = await s.register("Levan", "Jokhadze", parseAvatar(PNG));
-      const b = await s.register("Nika", "Test", parseAvatar(PNG));
+      const a = await s.register({ nickname: "levan_j", firstName: "Levan", lastName: "Jokhadze", avatar: parseAvatar(PNG) });
+      const b = await s.register({ nickname: "ნიკა", firstName: "Nika", lastName: "Test", avatar: parseAvatar(PNG) });
+      await expect(s.register({ nickname: "LEVAN_J", firstName: "X", lastName: "Y", avatar: parseAvatar(PNG) })).rejects.toThrow(/taken/);
+      await expect(s.register({ nickname: "a b", firstName: "X", lastName: "Y", avatar: parseAvatar(PNG) })).rejects.toThrow(/Nickname/);
       expect(a.user.rating).toBe(1500);
       expect((await s.userByToken(a.token))?.id).toBe(a.user.id);
       expect(await s.userByToken("nope-nope-nope-nope-nope")).toBeNull();
@@ -28,8 +30,9 @@ function suite(name: string, make: () => Store) {
       const games = await s.recentGames(a.user.id, 5);
       expect(games[0]).toMatchObject({ place: 1, score: 900, ratingBefore: 1500 });
 
-      const up = await s.updateProfile(a.user.id, { firstName: "Levani", avatar: parseAvatar(PNG) });
+      const up = await s.updateProfile(a.user.id, { firstName: "Levani", nickname: "levani", avatar: parseAvatar(PNG) });
       expect(up.firstName).toBe("Levani");
+      expect(up.nickname).toBe("levani");
       expect(up.avatarVersion).toBe(2);
       expect((await s.avatar(a.user.id))?.type).toBe("image/png");
     });
