@@ -53,6 +53,8 @@ export interface FinishedGame {
   code: string;
   mode: string;
   khishti: number;
+  /** Played in pairs (seats 0 & 2 against 1 & 3). */
+  pairs: boolean;
   /** userId per seat, null for bots. */
   userIds: (string | null)[];
   /** Display name per seat at the time of the game. */
@@ -271,6 +273,7 @@ export class RoomCore {
         code: d.code,
         mode: d.config.mode,
         khishti: d.config.khishti,
+        pairs: Boolean(d.config.pairs),
         userIds: d.seats.map((s) => s?.userId ?? null),
         names: d.seats.map((s, i) => s?.name ?? `#${i + 1}`),
         totals: d.game.totals.slice(),
@@ -300,7 +303,8 @@ export class RoomCore {
         const mode = msg.config.mode === "nines" ? "nines" : msg.config.mode === "standard" ? "standard" : d.config.mode;
         const kh = Number(msg.config.khishti);
         const khishti = KHISHTI_OPTIONS.includes(kh) ? kh : d.config.khishti;
-        d.config = { mode, khishti };
+        const pairs = typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
+        d.config = { mode, khishti, pairs };
         break;
       }
       case "seat": {

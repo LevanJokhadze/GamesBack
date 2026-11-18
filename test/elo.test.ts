@@ -26,4 +26,13 @@ describe("elo", () => {
     const [s] = eloDeltas([{ ...strong, score: 500 }, { ...weak, score: 0 }, { ...weak, score: 0 }, { ...weak, score: 0 }]);
     expect(w).toBeGreaterThan(s);
   });
+  it("pairs: partners win and lose together", () => {
+    const p = (rating: number, score: number) => ({ rating, games: 50, peak: rating, score });
+    // team 0 (seats 0, 2) beats team 1 (seats 1, 3); team scores are given per player
+    expect(eloDeltas([p(1500, 900), p(1500, 400), p(1500, 900), p(1500, 400)], { pairs: true })).toEqual([10, -10, 10, -10]);
+    // a weaker team beating a stronger one gains more
+    const d = eloDeltas([p(1400, 1), p(1700, 0), p(1400, 1), p(1700, 0)], { pairs: true });
+    expect(d[0]).toBeGreaterThan(10);
+    expect(d[0]).toBe(d[2]);
+  });
 });

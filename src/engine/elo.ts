@@ -32,8 +32,25 @@ export function expectedScore(a: number, b: number): number {
   return 1 / (1 + Math.pow(10, (b - a) / 400));
 }
 
-/** Rating change for every player (rounded to whole points). */
-export function eloDeltas(players: EloPlayer[]): number[] {
+/**
+ * Rating change for every player (rounded to whole points).
+ *
+ * With `pairs`, players 0 & 2 and 1 & 3 are partners and `score` is the team's
+ * score. That is one team game: each team is rated at the average of its two
+ * players, and each player gets their own full K times (result - expected),
+ * so partners win or lose together.
+ */
+export function eloDeltas(players: EloPlayer[], opts: { pairs?: boolean } = {}): number[] {
+  if (opts.pairs && players.length === 4) {
+    const avg = [(players[0].rating + players[2].rating) / 2, (players[1].rating + players[3].rating) / 2];
+    const score = [players[0].score, players[1].score];
+    return players.map((p, i) => {
+      const t = i % 2;
+      const o = 1 - t;
+      const actual = score[t] > score[o] ? 1 : score[t] < score[o] ? 0 : 0.5;
+      return Math.round(kFactor(p) * (actual - expectedScore(avg[t], avg[o])));
+    });
+  }
   const n = players.length;
   return players.map((p, i) => {
     const k = kFactor(p) / (n - 1);

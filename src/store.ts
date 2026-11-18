@@ -4,6 +4,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { BOT_RATING, START_RATING, eloDeltas } from "./engine/elo";
+import { rankingScores } from "./engine/game";
 import type { FinishedGame, RatingChange } from "./room-core";
 
 export interface User {
@@ -28,6 +29,7 @@ export interface GameRecord {
   id: string;
   finishedAt: string;
   mode: string;
+  pairs: boolean;
   score: number;
   place: number;
   ratingBefore: number;
@@ -53,6 +55,8 @@ export interface Match {
   finishedAt: string;
   mode: string;
   khishti: number;
+  /** Played in pairs: seats 0 & 2 against 1 & 3; `place` is the team's place. */
+  pairs: boolean;
   players: MatchPlayer[];
   pulkas: unknown[];
 }
@@ -124,20 +128,23 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-/** Places (1 = best) from totals; equal totals share a place. */
-function places(totals: number[]): number[] {
-  return totals.map((t) => 1 + totals.filter((o) => o > t).length);
+/** Places (1 = best); equal scores share a place. In pairs, partners share their team's place. */
+function places(totals: number[], pairs = false): number[] {
+  const r = rankingScores(totals, pairs);
+  if (pairs) return r.map((t) => (r.some((o) => o > t) ? 2 : 1));
+  return r.map((t) => 1 + r.filter((o) => o > t).length);
 }
 
 /** Pure rating step shared by both stores. */
 function computeChanges(game: FinishedGame, users: Map<string, User>): (RatingChange | null)[] {
+  const scores = rankingScores(game.totals, Boolean(game.pairs));
   const players = game.userIds.map((id, i) => {
     const u = id ? users.get(id) : undefined;
     return u
-      ? { rating: u.rating, games: u.games, peak: u.peak, score: game.totals[i] }
-      : { rating: BOT_RATING, games: 1000, peak: BOT_RATING, score: game.totals[i] };
+      ? { rating: u.rating, games: u.games, peak: u.peak, score: scores[i] }
+      : { rating: BOT_RATING, games: 1000, peak: BOT_RATING, score: scores[i] };
   });
-  const deltas = eloDeltas(players);
+  const deltas = eloDeltas(players, { pairs: Boolean(game.pairs) });
   return game.userIds.map((id, i) => {
     const u = id ? users.get(id) : undefined;
     if (!u) return null;
@@ -230,11 +237,12 @@ export class MemoryStore implements Store {
       .slice(0, limit)
       .map((g) => {
         const i = g.game.userIds.indexOf(id);
-        const pl = places(g.game.totals);
+        const pl = places(g.game.totals, g.game.pairs);
         return {
           id: g.id,
           finishedAt: g.finishedAt,
           mode: g.game.mode,
+          pairs: Boolean(g.game.pairs),
           score: g.game.totals[i],
           place: pl[i],
           ratingBefore: g.changes[i]!.before,
@@ -247,12 +255,13 @@ export class MemoryStore implements Store {
   async match(id: string) {
     const g = this.games.find((x) => x.id === id);
     if (!g) return null;
-    const pl = places(g.game.totals);
+    const pl = places(g.game.totals, g.game.pairs);
     return {
       id: g.id,
       finishedAt: g.finishedAt,
       mode: g.game.mode,
       khishti: g.game.khishti,
+      pairs: Boolean(g.game.pairs),
       pulkas: g.game.pulkas,
       players: g.game.names.map((name, s) => {
         const uid = g.game.userIds[s];
@@ -276,7 +285,7 @@ export class MemoryStore implements Store {
     const users = new Map<string, User>();
     for (const id of game.userIds) if (id && this.users.has(id)) users.set(id, this.users.get(id)!);
     const changes = computeChanges(game, users);
-    const pl = places(game.totals);
+    const pl = places(game.totals, game.pairs);
     game.userIds.forEach((id, i) => {
       const c = changes[i];
       const u = id ? this.users.get(id) : undefined;
@@ -322,6 +331,7 @@ CREATE TABLE IF NOT EXISTS games (
   khishti int NOT NULL DEFAULT -200,
   pulkas jsonb NOT NULL DEFAULT '[]'
 );
+ALTER TABLE games ADD COLUMN IF NOT EXISTS pairs boolean NOT NULL DEFAULT false;
 CREATE TABLE IF NOT EXISTS game_players (
   game_id uuid NOT NULL REFERENCES games(id) ON DELETE CASCADE,
   seat int NOT NULL,
@@ -444,7 +454,7 @@ export class PgStore implements Store {
   async recentGames(id: string, limit: number, before?: string) {
     if (!UUID_RE.test(id)) return [];
     const { rows } = await this.pool.query(
-      `SELECT g.id, g.finished_at, g.mode, gp.score, gp.place, gp.rating_before, gp.rating_after,
+      `SELECT g.id, g.finished_at, g.mode, g.pairs, gp.score, gp.place, gp.rating_before, gp.rating_after,
               (SELECT json_agg(json_build_object('name', o.name, 'userId', o.user_id, 'score', o.score, 'place', o.place) ORDER BY o.seat)
                  FROM game_players o WHERE o.game_id = g.id) AS players
        FROM game_players gp JOIN games g ON g.id = gp.game_id
@@ -456,6 +466,7 @@ export class PgStore implements Store {
       id: String(r.id),
       finishedAt: new Date(r.finished_at).toISOString(),
       mode: String(r.mode),
+      pairs: Boolean(r.pairs),
       score: Number(r.score),
       place: Number(r.place),
       ratingBefore: Number(r.rating_before),
@@ -466,7 +477,7 @@ export class PgStore implements Store {
 
   async match(id: string) {
     if (!UUID_RE.test(id)) return null;
-    const g = await this.pool.query(`SELECT id, finished_at, mode, khishti, pulkas FROM games WHERE id = $1`, [id]);
+    const g = await this.pool.query(`SELECT id, finished_at, mode, khishti, pairs, pulkas FROM games WHERE id = $1`, [id]);
     if (!g.rows[0]) return null;
     const p = await this.pool.query(
       `SELECT gp.seat, gp.name, gp.user_id, gp.score, gp.place, gp.rating_before, gp.rating_after, u.avatar_version
@@ -479,6 +490,7 @@ export class PgStore implements Store {
       finishedAt: new Date(r.finished_at).toISOString(),
       mode: String(r.mode),
       khishti: Number(r.khishti),
+      pairs: Boolean(r.pairs),
       pulkas: r.pulkas ?? [],
       players: p.rows.map((x) => ({
         seat: Number(x.seat),
@@ -502,10 +514,10 @@ export class PgStore implements Store {
       const { rows } = await client.query(`SELECT ${USER_COLS} FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE`, [ids]);
       const users = new Map(rows.map((r) => [String(r.id), rowToUser(r)]));
       const changes = computeChanges(game, users);
-      const pl = places(game.totals);
+      const pl = places(game.totals, game.pairs);
       const g = await client.query(
-        `INSERT INTO games (room_code, mode, totals, khishti, pulkas) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [game.code, game.mode, game.totals, game.khishti, JSON.stringify(game.pulkas)],
+        `INSERT INTO games (room_code, mode, totals, khishti, pairs, pulkas) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [game.code, game.mode, game.totals, game.khishti, Boolean(game.pairs), JSON.stringify(game.pulkas)],
       );
       for (let i = 0; i < game.userIds.length; i++) {
         const c = changes[i];

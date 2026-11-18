@@ -18,7 +18,7 @@ function suite(name: string, make: () => Store) {
       expect(await s.userByToken("nope-nope-nope-nope-nope")).toBeNull();
 
       const { matchId, changes } = await s.rateGame({
-        code: "ABCDE", mode: "standard", khishti: -200,
+        code: "ABCDE", mode: "standard", khishti: -200, pairs: false,
         userIds: [a.user.id, null, b.user.id, null], names: ["levan_j", "Bot Gio", "ნიკა", "Bot Luka"],
         totals: [900, 400, 100, -300], pulkas: [{ deals: [], total: [1, 2, 3, 4] }],
       });
@@ -45,6 +45,27 @@ function suite(name: string, make: () => Store) {
       expect(up.nickname).toBe("levani");
       expect(up.avatarVersion).toBe(2);
       expect((await s.avatar(a.user.id))?.type).toBe("image/png");
+    });
+
+    it("rates a pairs game by team", async () => {
+      const s = make();
+      await s.init();
+      const tag = Math.random().toString(36).slice(2, 8);
+      const a = await s.register({ nickname: "pa_" + tag, firstName: "A", lastName: "A", avatar: parseAvatar(PNG) });
+      const b = await s.register({ nickname: "pb_" + tag, firstName: "B", lastName: "B", avatar: parseAvatar(PNG) });
+      // a (seat 0) and b (seat 2) are partners; a scored little but the team won 600 to 500.
+      const { matchId, changes } = await s.rateGame({
+        code: "PAIRS", mode: "standard", khishti: -200, pairs: true,
+        userIds: [a.user.id, null, b.user.id, null], names: ["a", "Bot Gio", "b", "Bot Luka"],
+        totals: [-100, 400, 700, 100], pulkas: [],
+      });
+      expect(changes[0]!.delta).toBe(20);
+      expect(changes[2]!.delta).toBe(20);
+      const m = (await s.match(matchId))!;
+      expect(m.pairs).toBe(true);
+      expect(m.players.map((p) => p.place)).toEqual([1, 2, 1, 2]);
+      expect((await s.userById(a.user.id))!.wins).toBe(1);
+      expect((await s.recentGames(a.user.id, 1))[0]).toMatchObject({ pairs: true, place: 1, score: -100 });
     });
   });
 }

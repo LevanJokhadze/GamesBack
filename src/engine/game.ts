@@ -11,9 +11,31 @@ export interface GameConfig {
   mode: GameMode;
   /** Points for "khishti": bid at least one trick and took none. */
   khishti: number;
+  /** Play in pairs: partners sit opposite (seats 0 & 2 against 1 & 3) and add their points together. */
+  pairs: boolean;
 }
 
-export const DEFAULT_CONFIG: GameConfig = { mode: "standard", khishti: -200 };
+export const DEFAULT_CONFIG: GameConfig = { mode: "standard", khishti: -200, pairs: false };
+
+/** Team of a seat in pairs mode: 0 (seats 0 and 2) or 1 (seats 1 and 3). */
+export function teamOf(seat: number): number {
+  return seat % 2;
+}
+
+/** Combined points of the two teams. */
+export function teamTotals(totals: number[]): [number, number] {
+  return [totals[0] + totals[2], totals[1] + totals[3]];
+}
+
+/**
+ * The score that decides places: a player's own total, or in pairs mode the
+ * team's total (so partners always share a place).
+ */
+export function rankingScores(totals: number[], pairs: boolean): number[] {
+  if (!pairs) return totals.slice();
+  const t = teamTotals(totals);
+  return totals.map((_, i) => t[teamOf(i)]);
+}
 
 export type JokerMode =
   | { type: "high"; suit?: Suit } // lead: "wants" the highest card of suit; follow: takes the trick
