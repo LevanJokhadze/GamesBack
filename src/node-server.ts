@@ -8,6 +8,8 @@ import { randomInt } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 import { Conn, RoomCore, UserInfo } from "./room-core";
 import { InputError, User, makeStore, parseAvatar } from "./store";
+import { Conflict, Forbidden, NotFound, Sheets } from "./offline";
+import { RuleError } from "./engine/game";
 
 const PORT = Number(process.env.PORT ?? 8787);
 const ALLOWED = (process.env.ALLOWED_ORIGINS ?? "*").split(",").map((s) => s.trim()).filter(Boolean);
@@ -48,6 +50,7 @@ function publicUser(u: User) {
     avatarUrl: avatarUrl(u),
   };
 }
+const sheets = new Sheets(store, avatarUrl);
 const playerIds = new WeakMap<WebSocket, string | null>();
 
 function wrap(ws: WebSocket): Conn {
@@ -99,7 +102,7 @@ function send(req: IncomingMessage, res: ServerResponse, status: number, body: u
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (origin && originOk(origin)) {
     headers["Access-Control-Allow-Origin"] = origin;
-    headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,OPTIONS";
+    headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS";
     headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
     headers["Vary"] = "Origin";
   }
@@ -145,7 +148,10 @@ function loginFailed(ip: string): void {
 
 const server = createServer((req, res) => {
   handle(req, res).catch((e) => {
-    if (e instanceof InputError) return send(req, res, 400, { error: e.message });
+    if (e instanceof InputError || e instanceof RuleError) return send(req, res, 400, { error: e.message });
+    if (e instanceof NotFound) return send(req, res, 404, { error: "not found" });
+    if (e instanceof Forbidden) return send(req, res, 403, { error: e.message });
+    if (e instanceof Conflict) return send(req, res, 409, { error: "The sheet was changed by someone else. Reload it." });
     console.error(e);
     send(req, res, 500, { error: "server error" });
   });
@@ -250,6 +256,12 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     const rows = await store.leaderboard(limit);
     return send(req, res, 200, { players: rows.map((u) => ({ ...publicUser(u), rank: u.rank })) });
   }
+  if (url.pathname === "/api/users/search" && req.method === "GET") {
+    if (!(await authUser(req))) return send(req, res, 401, { error: "not registered" });
+    const rows = await store.searchUsers(url.searchParams.get("q") ?? "", 10);
+    return send(req, res, 200, { players: rows.map(publicUser) });
+  }
+  if (url.pathname.startsWith("/api/sheets")) return handleSheets(req, res, url);
   const av = url.pathname.match(/^\/api\/users\/([0-9a-f-]{36})\/avatar$/i);
   if (av) {
     const a = await store.avatar(av[1]);
@@ -286,6 +298,34 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return info ? send(req, res, 200, info) : send(req, res, 404, { error: "room not found" });
   }
   send(req, res, 404, { error: "not found" });
+}
+
+/** Score sheets for games played in person (see src/offline.ts). All calls need an account. */
+async function handleSheets(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
+  const me = await authUser(req);
+  if (!me) return send(req, res, 401, { error: "not registered" });
+  if (req.method !== "GET" && !originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
+  if (url.pathname === "/api/sheets") {
+    if (req.method === "GET") return send(req, res, 200, { sheets: await sheets.list(me) });
+    if (req.method === "POST") return send(req, res, 201, { sheet: await sheets.create(me, await readJson(req, 8192)) });
+  }
+  const m = url.pathname.match(/^\/api\/sheets\/([0-9a-f-]{36})(?:\/(deals|submit|confirm|reject))?$/i);
+  if (!m) return send(req, res, 404, { error: "not found" });
+  const [, id, action] = m;
+  if (!action && req.method === "GET") return send(req, res, 200, { sheet: await sheets.get(me, id) });
+  if (!action && req.method === "DELETE") {
+    await sheets.cancel(me, id);
+    return send(req, res, 200, { ok: true });
+  }
+  if (action && (req.method === "POST" || req.method === "PUT")) {
+    const body = await readJson(req, 64 * 1024);
+    const version = Number(body.version);
+    if (action === "deals") return send(req, res, 200, { sheet: await sheets.setDeals(me, id, version, body.deals) });
+    if (action === "submit") return send(req, res, 200, { sheet: await sheets.submit(me, id, version) });
+    if (action === "confirm") return send(req, res, 200, { sheet: await sheets.confirm(me, id, version) });
+    if (action === "reject") return send(req, res, 200, { sheet: await sheets.reject(me, id, version) });
+  }
+  send(req, res, 405, { error: "method not allowed" });
 }
 
 const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });
