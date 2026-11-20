@@ -40,7 +40,7 @@ def _fallback(clip_title: str, streamer: str) -> dict:
 def make(clip_title: str, transcript: str, streamer: str) -> dict:
     if not config.ANTHROPIC_API_KEY:
         return _fallback(clip_title, streamer)
-    body = {"model": config.TITLE_MODEL, "max_tokens": 200,
+    body = {"model": config.TITLE_MODEL, "max_tokens": 2000,
             "messages": [{"role": "user", "content": PROMPT.format(streamer=streamer, clip_title=clip_title,
                                                                    transcript=(transcript or "")[:1500])}]}
     req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=json.dumps(body).encode(),
@@ -48,7 +48,7 @@ def make(clip_title: str, transcript: str, streamer: str) -> dict:
                                           "content-type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
-            text = json.load(r)["content"][0]["text"]
+            text = "".join(b.get("text", "") for b in json.load(r).get("content", []) if b.get("type") == "text")
         m = re.search(r"\{.*\}", text, re.S)
         out = json.loads(m.group(0)) if m else {}
         if not out.get("title"):
