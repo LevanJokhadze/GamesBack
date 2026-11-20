@@ -113,7 +113,38 @@ CREATE TABLE IF NOT EXISTS heartbeats (
   last_error TEXT,
   runs INT DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS geos (
+  id SERIAL PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  sort INT DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS accounts (
+  id SERIAL PRIMARY KEY,
+  geo_id INT NOT NULL REFERENCES geos(id) ON DELETE RESTRICT,
+  platform TEXT NOT NULL,
+  handle TEXT NOT NULL,
+  login TEXT,
+  password_enc TEXT,
+  profile_url TEXT,
+  status TEXT DEFAULT 'warming',
+  streamers TEXT[] NOT NULL DEFAULT '{}',
+  buffer_channel_id TEXT,
+  followers BIGINT,
+  total_views BIGINT,
+  total_posts INT,
+  total_likes BIGINT,
+  stats_at TIMESTAMPTZ,
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS accounts_geo ON accounts(geo_id, platform);
 """
+
+# Geos created on first start (names only, no account data)
+DEFAULT_GEOS = [("US", "United States", 1), ("RU", "Russia", 2)]
 
 DEFAULT_SETTINGS = {
     "auto_approve": False,
@@ -154,6 +185,9 @@ def migrate():
         c.execute(SCHEMA)
         for k, v in DEFAULT_SETTINGS.items():
             c.execute("INSERT INTO settings(key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", (k, json.dumps(v)))
+        if not c.execute("SELECT 1 FROM geos LIMIT 1").fetchone():
+            for code, name, sort in DEFAULT_GEOS:
+                c.execute("INSERT INTO geos(code, name, sort) VALUES (%s,%s,%s) ON CONFLICT (code) DO NOTHING", (code, name, sort))
 
 
 def settings() -> dict:

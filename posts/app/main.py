@@ -6,11 +6,13 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import auth, config, db, seed
+from . import accounts, auth, config, db, seed
 from .workers import runner
 
 app = FastAPI(title="posts.lane.ge API")
 app.add_middleware(CORSMiddleware, allow_origins=config.ALLOWED_ORIGINS, allow_methods=["*"], allow_headers=["*"])
+
+app.include_router(accounts.router, prefix="/api", dependencies=[Depends(auth.require)])
 
 _login_fail: dict[str, list[float]] = defaultdict(list)
 
