@@ -141,6 +141,31 @@ CREATE TABLE IF NOT EXISTS accounts (
   updated_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS accounts_geo ON accounts(geo_id, platform);
+-- upload mode: 'manual' = the pipeline emails a reminder to upload by hand at each slot and never posts through Buffer;
+-- 'automatic' = posted through its linked Buffer channel. Accounts that existed before this column keep posting:
+-- linked ones become automatic, the rest manual. New accounts start manual.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS upload_mode TEXT;
+UPDATE accounts SET upload_mode = CASE WHEN buffer_channel_id IS NOT NULL THEN 'automatic' ELSE 'manual' END
+  WHERE upload_mode IS NULL;
+ALTER TABLE accounts ALTER COLUMN upload_mode SET DEFAULT 'manual';
+ALTER TABLE accounts ALTER COLUMN upload_mode SET NOT NULL;
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS manual_since TIMESTAMPTZ;
+UPDATE accounts SET manual_since = created_at WHERE manual_since IS NULL;
+ALTER TABLE accounts ALTER COLUMN manual_since SET DEFAULT now();
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS week_hint_at TIMESTAMPTZ;
+-- one row per clip handed to a manual account: the reminder email, and later the link once uploaded
+CREATE TABLE IF NOT EXISTS manual_uploads (
+  id SERIAL PRIMARY KEY,
+  account_id INT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  clip_id INT NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+  slot_at TIMESTAMPTZ NOT NULL,
+  emailed_at TIMESTAMPTZ,
+  done_at TIMESTAMPTZ,
+  link TEXT,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (account_id, clip_id)
+);
+CREATE INDEX IF NOT EXISTS manual_uploads_slot ON manual_uploads(account_id, slot_at);
 """
 
 # Geos created on first start (names only, no account data)

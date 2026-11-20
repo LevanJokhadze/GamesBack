@@ -14,6 +14,7 @@ It turns a streamer's best Twitch moments into vertical clips for paid view camp
 | `render` | 3 min | Takes the most-viewed new moment (up to `daily_quota` clips per campaign per US-Eastern day): downloads it, transcribes it (faster-whisper), writes the title, cuts a 1080x1920 react clip (webcam on top, game below), burns in the campaign's logo overlay, uploads video + thumbnail to Vercel Blob. The clip then waits for review (or is approved at once with `auto_approve` and a written title). |
 | `publish` | 5 min | Schedules every approved clip in Buffer on each connected channel at the next free US-Eastern slot (`slots_et`, max `max_posts_per_day` per channel, `stagger_minutes` between platforms). |
 | `monitor` | 10 min | Follows each Buffer post until it is sent (stores the public link) or fails, and stores views/likes/comments/shares every 2 hours (needs a Buffer key with `insights:read`). |
+| `manual` | 5 min | For accounts in **manual** upload mode (new accounts start manual): at each US-Eastern slot, within the same daily limits, emails a reminder with the clip's download link, caption and hashtags, platform and username, instead of posting through Buffer. Never sends the same clip to the same account twice. After 7 days it emails once to suggest switching the account to automatic on the Accounts page. |
 
 Heartbeats, errors and a log are stored in the database and shown on the dashboard. `workers_paused` stops
 the timers; "Run now" in the dashboard still runs a worker once.
