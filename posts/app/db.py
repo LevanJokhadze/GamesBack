@@ -123,6 +123,8 @@ DEFAULT_SETTINGS = {
     "max_posts_per_day": 3,
     # Buffer refuses more than 2 YouTube posts a day on this channel
     "max_per_day_by_service": {"youtube": 2},
+    # timezone of the Buffer account: its daily limits count days in this zone
+    "buffer_timezone": "Asia/Tbilisi",
     "stagger_minutes": 15,
     "services": ["tiktok", "instagram", "youtube"],
 }

@@ -19,18 +19,23 @@ def day_cap(service: str, s: dict) -> int:
 
 
 def next_slot(channel_id: str, service: str, s: dict, after: datetime) -> datetime:
+    """Next posting time from the US-Eastern slots that is not within an hour of another post on this channel and
+    whose day still has room. Days are counted in Buffer's own timezone, the one its daily limits use."""
     slots = sorted(s.get("slots_et") or ["19:00"])
     taken = [r["due_at"] for r in db.q("""SELECT due_at FROM posts WHERE channel_id=%s AND status <> 'deleted'
                                           AND due_at > now() - interval '2 days'""", (channel_id,))]
     cap = day_cap(service, s)
+    btz = ZoneInfo(s.get("buffer_timezone") or "Asia/Tbilisi")
     day = after.astimezone(ET).date()
     for _ in range(30):
-        if sum(1 for x in taken if x.astimezone(ET).date() == day) < cap:
-            for hhmm in slots:
-                h, mi = map(int, hhmm.split(":"))
-                t = datetime(day.year, day.month, day.day, h, mi, tzinfo=ET).astimezone(timezone.utc)
-                if t > after and not any(abs((x - t).total_seconds()) < 3600 for x in taken):
-                    return t
+        for hhmm in slots:
+            h, mi = map(int, hhmm.split(":"))
+            t = datetime(day.year, day.month, day.day, h, mi, tzinfo=ET).astimezone(timezone.utc)
+            if t <= after or any(abs((x - t).total_seconds()) < 3600 for x in taken):
+                continue
+            if sum(1 for x in taken if x.astimezone(btz).date() == t.astimezone(btz).date()) >= cap:
+                continue
+            return t
         day += timedelta(days=1)
     raise RuntimeError("no free slot in the next 30 days")
 
