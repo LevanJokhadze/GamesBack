@@ -9,3 +9,4 @@ numpy>=1.26
 opencv-python-headless>=4.9
 requests>=2.31
 huggingface_hub
+cryptography>=43

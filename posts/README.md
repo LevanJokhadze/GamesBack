@@ -33,7 +33,15 @@ Clip rendering uses scripts vendored from [gtavi-claudecode](https://github.com/
 | `BLOB_READ_WRITE_TOKEN` | Vercel Blob store token (public store) for hosting the videos Buffer fetches. |
 | `ANTHROPIC_API_KEY` | Optional. Claude writes titles and caption hooks from the transcript. Without it the viewer's Twitch clip title is used and every clip waits for review. |
 | `TITLE_MODEL` | Optional, default `claude-haiku-5-5`. |
+| `ACCOUNTS_KEY` | Encrypts the social account passwords saved on the Accounts page (Fernet, key derived from this string). Any long random string; never change it afterwards, or saved passwords can't be read. Without it accounts still work, passwords just can't be saved. |
 | `RUN_WORKERS` | `1` (default) runs the workers in this process; `0` serves the API only. |
+
+## Accounts
+
+`geos` (US and Russia are created on first start) hold `accounts`, one per Instagram / TikTok / YouTube profile:
+handle, login, password (encrypted with `ACCOUNTS_KEY`, returned only by `POST /api/accounts/{id}/reveal`, which is logged),
+status, the streamers it targets, notes and stats. An account linked to a Buffer channel takes views, posts and likes from
+the pipeline's posts on that channel; followers and the stats of unlinked accounts are typed in.
 
 ## Run locally
 
