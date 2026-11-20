@@ -1,7 +1,7 @@
 """Monitor: follow every Buffer post until it is sent (link) or fails, and record views/likes over time."""
 from datetime import datetime, timezone
 
-from .. import db
+from .. import db, notify
 from ..integrations import buffer
 
 FIELDS = {"views": ("view", "views", "plays", "video_views", "impressions"),
@@ -45,6 +45,8 @@ def run():
                 db.log("monitor", f"{p['service']} post for clip #{p['clip_id']} failed: {err}", "error")
             elif st["status"] == "sent":
                 db.log("monitor", f"{p['service']} post for clip #{p['clip_id']} is live: {st.get('externalLink')}")
+    notify.live_posts()
+    notify.failed_posts()
     db.q("""UPDATE clips SET status='posted' WHERE status='scheduled' AND NOT EXISTS (
               SELECT 1 FROM posts p WHERE p.clip_id = clips.id AND p.status NOT IN ('sent','error','deleted'))""")
 

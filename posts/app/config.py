@@ -21,3 +21,13 @@ TITLE_MODEL = env("TITLE_MODEL", "claude-haiku-5-5")
 RUN_WORKERS = env("RUN_WORKERS", "1") == "1"
 WORK_DIR = Path(env("WORK_DIR", "/tmp/posts-work"))
 VENDOR = Path(__file__).resolve().parent.parent / "vendor" / "gtavi"
+
+# Email alerts (Gmail SMTP with an app password works: smtp.gmail.com, 465)
+SMTP_HOST = env("SMTP_HOST")
+SMTP_PORT = env("SMTP_PORT", "465")
+SMTP_USER = env("SMTP_USER")
+SMTP_PASSWORD = env("SMTP_PASSWORD")
+MAIL_FROM = env("MAIL_FROM")
+MAIL_FROM_NAME = env("MAIL_FROM_NAME", "posts.lane.ge")
+ALERT_EMAIL = env("ALERT_EMAIL")
+DASHBOARD_URL = (env("DASHBOARD_URL", "https://posts.lane.ge") or "").rstrip("/")

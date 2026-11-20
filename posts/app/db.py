@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS metrics (
   views BIGINT, likes BIGINT, comments BIGINT, shares BIGINT, saves BIGINT
 );
 CREATE INDEX IF NOT EXISTS metrics_post_ts ON metrics(post_id, ts);
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value JSONB);
 CREATE TABLE IF NOT EXISTS events (
   id BIGSERIAL PRIMARY KEY,

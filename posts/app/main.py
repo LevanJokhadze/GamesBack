@@ -220,6 +220,20 @@ def events(limit: int = 150, level: str | None = None):
     return db.q("SELECT * FROM events ORDER BY id DESC LIMIT %s", (limit,))
 
 
+@app.post("/api/notify/test", dependencies=[A])
+def notify_test():
+    from . import notify
+    if not notify.enabled():
+        raise HTTPException(400, "email is not configured (SMTP_HOST, SMTP_USER, SMTP_PASSWORD, ALERT_EMAIL)")
+    try:
+        notify.send("posts.lane.ge: email alerts are on",
+                    "You'll get an email whenever a clip goes live, with the links to submit on Content Rewards, "
+                    "and whenever a post fails.")
+    except Exception as e:
+        raise HTTPException(502, f"sending failed: {e}")
+    return {"ok": True}
+
+
 @app.post("/api/workers/{name}/run", dependencies=[A])
 def run_worker(name: str):
     if not runner.trigger(name):
