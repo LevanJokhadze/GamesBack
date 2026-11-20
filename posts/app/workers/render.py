@@ -28,7 +28,7 @@ def sh(cmd, cwd=None, env=None, timeout=1800):
 
 def rendered_today(campaign_id: int) -> int:
     start = datetime.now(ET).replace(hour=0, minute=0, second=0, microsecond=0)
-    return db.one("SELECT count(*) AS n FROM clips WHERE campaign_id=%s AND created_at >= %s",
+    return db.one("SELECT count(*) AS n FROM clips WHERE campaign_id=%s AND created_at >= %s AND status <> 'rejected'",
                   (campaign_id, start))["n"]
 
 
