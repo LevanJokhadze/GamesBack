@@ -51,13 +51,15 @@ def next_slot(account: dict, s: dict, now: datetime | None = None) -> datetime |
     return None
 
 
-def pick_clip(account: dict) -> dict | None:
-    """The freshest approved clip this account hasn't been given, preferring clips not yet on its platform."""
+def pick_clip(account: dict, exclude: list[int] | None = None) -> dict | None:
+    """The freshest approved clip this account hasn't been given, preferring clips not yet on its platform.
+    `exclude` leaves out clips already planned for earlier slots (the calendar's forecast)."""
     streamers = [x.lower() for x in account.get("streamers") or []]
     return db.one("""
         SELECT c.*, ca.name AS campaign, ca.url AS campaign_url FROM clips c LEFT JOIN campaigns ca ON ca.id = c.campaign_id
         WHERE c.status IN ('approved','scheduled','posted') AND c.video_url IS NOT NULL
           AND c.approved_at > now() - interval '4 days'
+          AND NOT (c.id = ANY(%(ex)s::int[]))
           AND NOT EXISTS (SELECT 1 FROM manual_uploads mu WHERE mu.account_id = %(a)s AND mu.clip_id = c.id)
           AND NOT EXISTS (SELECT 1 FROM posts p WHERE p.clip_id = c.id AND p.status <> 'deleted'
                           AND p.channel_id IN (%(ch)s, %(mch)s))
@@ -69,7 +71,7 @@ def pick_clip(account: dict) -> dict | None:
           + (SELECT count(*) FROM posts p WHERE p.clip_id = c.id AND p.service = %(pf)s AND p.status <> 'deleted'),
           c.approved_at DESC
         LIMIT 1""", {"a": account["id"], "ch": account.get("buffer_channel_id") or "", "mch": f"manual:{account['id']}",
-                     "st": streamers, "pf": account["platform"]})
+                     "st": streamers, "pf": account["platform"], "ex": list(exclude or [])})
 
 
 def send_one(account: dict, slot: datetime) -> dict | None:
