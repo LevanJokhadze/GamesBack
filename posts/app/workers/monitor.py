@@ -48,12 +48,12 @@ def run():
     if buffer.paused_until() > time.time():
         return 0  # waiting for Buffer's rate-limit window to reset
     due = db.q("""SELECT * FROM posts WHERE due_at < now() - interval '3 minutes'
-                  AND (status NOT IN ('sent','error','deleted') OR (status='sent' AND external_link IS NULL))""")
+                  AND (status NOT IN ('sent','error','deleted','draft') OR (status='sent' AND external_link IS NULL))""")
     s = db.settings()
     stats_due = time.time() - float(s.get("stats_at") or 0) > STATS_EVERY and \
         db.one("SELECT 1 AS x FROM posts WHERE status='sent' AND sent_at > now() - interval '30 days' LIMIT 1")
     sync_due = time.time() - float(s.get("synced_at") or 0) > SYNC_EVERY and \
-        db.one("SELECT 1 AS x FROM posts WHERE status NOT IN ('sent','error','deleted') LIMIT 1")
+        db.one("SELECT 1 AS x FROM posts WHERE status NOT IN ('sent','error','deleted','draft') LIMIT 1")
     changed = 0
     if due or stats_due or sync_due:
         chans = [c["id"] for c in buffer.channels()]
@@ -99,5 +99,5 @@ def run():
     notify.live_posts()
     notify.failed_posts()
     db.q("""UPDATE clips SET status='posted' WHERE status='scheduled' AND NOT EXISTS (
-              SELECT 1 FROM posts p WHERE p.clip_id = clips.id AND p.status NOT IN ('sent','error','deleted'))""")
+              SELECT 1 FROM posts p WHERE p.clip_id = clips.id AND p.status NOT IN ('sent','error','deleted','draft'))""")
     return changed

@@ -63,7 +63,7 @@ def run():
     # Buffer's free plan holds at most 10 queued posts per channel at a time
     cap_q = int(s.get("max_queued_per_channel") or 10)
     queued = {r["channel_id"]: r["n"] for r in db.q("""SELECT channel_id, count(*) AS n FROM posts
-                                                     WHERE status NOT IN ('sent','error','deleted') GROUP BY channel_id""")}
+                                                     WHERE status NOT IN ('sent','error','deleted','draft') GROUP BY channel_id""")}
     for clip in clips:
         have = {r["channel_id"] for r in db.q("SELECT channel_id FROM posts WHERE clip_id=%s AND status <> 'deleted'",
                                               (clip["id"],))}
