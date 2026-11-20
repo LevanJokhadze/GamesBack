@@ -19,6 +19,10 @@ _login_fail: dict[str, list[float]] = defaultdict(list)
 def startup():
     db.migrate()
     seed.run()
+    # a restart (deploy, crash) mid-render leaves moments marked 'rendering': put them back in the queue
+    stuck = db.q("UPDATE moments SET status='new', updated_at=now() WHERE status='rendering' RETURNING id")
+    if stuck:
+        db.log("api", f"{len(stuck)} interrupted render(s) put back in the queue", "warn")
     if config.RUN_WORKERS:
         runner.start()
         db.log("api", "workers started")

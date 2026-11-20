@@ -106,7 +106,9 @@ def z(a):
 
 
 def smooth(a, k):
-    k = max(1, int(k))
+    # posts.lane.ge patch: cap the window at the series length, or "same" mode returns the window's length
+    # and short clips (< 30 s) crash with a shape mismatch.
+    k = max(1, min(int(k), len(a)))
     return np.convolve(a, np.ones(k) / k, mode="same")
 
 
