@@ -48,8 +48,11 @@ def login(body: Login):
 
 A = Depends(auth.require)
 
-EST_SQL = """SELECT COALESCE(SUM(LEAST(GREATEST(p.views,0) / 1000.0 * c.cpm, COALESCE(c.max_payout, 1e12))), 0) AS est
-             FROM posts p JOIN campaigns c ON c.id = p.campaign_id WHERE p.status='sent'"""
+# Each post is its own submission: paid views/1000 * cpm, but $0 below the campaign's minimum and capped at its maximum.
+PAY = """CASE WHEN GREATEST(p.views,0) / 1000.0 * ca.cpm < COALESCE(ca.min_payout, 0) THEN 0
+              ELSE LEAST(GREATEST(p.views,0) / 1000.0 * ca.cpm, COALESCE(ca.max_payout, 1e12)) END"""
+EST_SQL = f"""SELECT COALESCE(SUM({PAY}), 0) AS est, count(*) FILTER (WHERE ({PAY}) > 0) AS paying
+              FROM posts p JOIN campaigns ca ON ca.id = p.campaign_id WHERE p.status='sent'"""
 
 
 @app.get("/api/overview", dependencies=[A])
@@ -64,7 +67,9 @@ def overview():
                        JOIN clips c ON c.id=p.clip_id WHERE p.status='scheduled' ORDER BY p.due_at LIMIT 8""")
     to_submit = db.one("SELECT count(*) n FROM posts WHERE status='sent' AND external_link IS NOT NULL AND NOT submitted")["n"]
     moments = {r["status"]: r["n"] for r in db.q("SELECT status, count(*) n FROM moments GROUP BY status")}
-    return {"clips": clips, "posts": posts, "moments": moments, "totals": tot, "est_earnings": float(db.one(EST_SQL)["est"]),
+    est = db.one(EST_SQL)
+    return {"clips": clips, "posts": posts, "moments": moments, "totals": tot, "est_earnings": float(est["est"]),
+            "paying_posts": est["paying"],
             "by_service": by_service, "upcoming": upcoming, "to_submit": to_submit,
             "workers": db.q("SELECT * FROM heartbeats ORDER BY worker"), "settings": db.settings()}
 
@@ -114,7 +119,9 @@ def reject(clip_id: int):
 
 @app.get("/api/posts", dependencies=[A])
 def posts(limit: int = 100):
-    return db.q("""SELECT p.*, c.title, c.thumb_url, ca.name AS campaign, ca.url AS campaign_url FROM posts p
+    return db.q(f"""SELECT p.*, c.title, c.thumb_url, ca.name AS campaign, ca.url AS campaign_url,
+                    ca.min_payout, ca.cpm, ({PAY}) AS est_pay,
+                    CEIL(COALESCE(ca.min_payout,0) / NULLIF(ca.cpm,0) * 1000) AS views_needed FROM posts p
                    JOIN clips c ON c.id = p.clip_id LEFT JOIN campaigns ca ON ca.id = p.campaign_id
                    ORDER BY p.due_at DESC LIMIT %s""", (limit,))
 
