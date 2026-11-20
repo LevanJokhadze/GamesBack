@@ -19,8 +19,11 @@ Title a viewer gave this Twitch clip: {clip_title!r}
 Transcript of the streamer (may be noisy): {transcript!r}
 
 Return only JSON: {{"title": "...", "hook": "..."}}
-- title: on-video headline, 4-12 words, names the streamer or the game, says what happens.
-- hook: one short caption line (max 80 chars), may end with one fitting emoji.
+- title: on-video headline shown in the first seconds, 5-12 words. Formula: who + what is at stake + the open
+  question, so the viewer waits for the payoff (e.g. "He bet a free copy of GTA 6 he would NOT get eaten by a crocodile").
+  Never reveal the ending. Name the streamer or GTA 6. Must stay true to the transcript.
+- hook: one caption line (max 80 chars) that invites comments, ideally a short question to the viewer
+  (e.g. "Would you have run? 🐊"), may end with one fitting emoji.
 - If the transcript and clip title don't make clear what happens, return {{"title": "", "hook": ""}}."""
 
 
