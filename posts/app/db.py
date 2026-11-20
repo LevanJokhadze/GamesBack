@@ -125,6 +125,8 @@ DEFAULT_SETTINGS = {
     "max_per_day_by_service": {"youtube": 2},
     # timezone of the Buffer account: its daily limits count days in this zone
     "buffer_timezone": "Asia/Tbilisi",
+    # Buffer's free plan keeps at most 10 scheduled posts per channel at a time
+    "max_queued_per_channel": 10,
     "stagger_minutes": 15,
     "services": ["tiktok", "instagram", "youtube"],
 }

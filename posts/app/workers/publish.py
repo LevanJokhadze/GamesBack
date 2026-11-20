@@ -60,10 +60,15 @@ def run():
                    key=lambda ch: order.get(ch["service"], 99))
     stagger = int(s.get("stagger_minutes") or 15)
     n = 0
+    # Buffer's free plan holds at most 10 queued posts per channel at a time
+    cap_q = int(s.get("max_queued_per_channel") or 10)
+    queued = {r["channel_id"]: r["n"] for r in db.q("""SELECT channel_id, count(*) AS n FROM posts
+                                                     WHERE status NOT IN ('sent','error','deleted') GROUP BY channel_id""")}
     for clip in clips:
         have = {r["channel_id"] for r in db.q("SELECT channel_id FROM posts WHERE clip_id=%s AND status <> 'deleted'",
                                               (clip["id"],))}
-        missing = [ch for ch in chans if ch["id"] not in have and f"{clip['id']}:{ch['id']}" not in refused]
+        missing = [ch for ch in chans if ch["id"] not in have and f"{clip['id']}:{ch['id']}" not in refused
+                   and queued.get(ch["id"], 0) < cap_q]
         if not missing:
             continue
         earliest = datetime.now(timezone.utc) + timedelta(minutes=20)
@@ -85,6 +90,7 @@ def run():
             db.q("""INSERT INTO posts(clip_id, campaign_id, channel_id, channel_name, service, buffer_post_id, due_at, status)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
                  (clip["id"], clip["campaign_id"], ch["id"], ch["name"], ch["service"], p["id"], p["dueAt"], p["status"]))
+            queued[ch["id"]] = queued.get(ch["id"], 0) + 1
             planned.append(f"{ch['service']} {due.astimezone(ET):%a %H:%M}")
             n += 1
         if planned:

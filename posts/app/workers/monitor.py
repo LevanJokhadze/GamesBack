@@ -18,6 +18,7 @@ FIELDS = {"views": ("view", "views", "plays", "video_views", "impressions"),
           "saves": ("save", "saves", "favorites")}
 
 STATS_EVERY = 12 * 3600
+SYNC_EVERY = 2 * 3600  # also look every 2 h while posts are queued, to catch "Publish Now", edits and deletions in Buffer
 
 
 def _pick(metrics: list[dict]) -> dict:
@@ -51,8 +52,10 @@ def run():
     s = db.settings()
     stats_due = time.time() - float(s.get("stats_at") or 0) > STATS_EVERY and \
         db.one("SELECT 1 AS x FROM posts WHERE status='sent' AND sent_at > now() - interval '30 days' LIMIT 1")
+    sync_due = time.time() - float(s.get("synced_at") or 0) > SYNC_EVERY and \
+        db.one("SELECT 1 AS x FROM posts WHERE status NOT IN ('sent','error','deleted') LIMIT 1")
     changed = 0
-    if due or stats_due:
+    if due or stats_due or sync_due:
         chans = [c["id"] for c in buffer.channels()]
         want_stats = bool(stats_due) and not s.get("stats_scope_missing")
         try:
@@ -66,9 +69,10 @@ def run():
             else:
                 raise
         by_id = {n["id"]: n for n in nodes}
-        for p in due:
-            if p["buffer_post_id"] in by_id:
-                changed += _apply(p, by_id[p["buffer_post_id"]])
+        db.set_setting("synced_at", time.time())
+        # every post of ours Buffer reports as sent or failed, due or not (a post published early with "Publish Now")
+        for p in db.q("SELECT * FROM posts WHERE buffer_post_id = ANY(%s)", (list(by_id),)):
+            changed += _apply(p, by_id[p["buffer_post_id"]])
         # a due post missing from the list (deleted in Buffer, or still sending): ask for it alone, a few at most
         late = [p for p in due if p["buffer_post_id"] not in by_id
                 and p["due_at"] < datetime.now(timezone.utc) - timedelta(hours=2)]
