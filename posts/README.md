@@ -47,3 +47,5 @@ DATABASE_URL=postgresql://... ADMIN_PASSWORD=... RUN_WORKERS=0 uvicorn app.main:
 
 Service with root directory `posts` (it builds the `Dockerfile`), a Postgres service, and the variables above.
 The image bakes the whisper and face models so a new deploy renders right away. Give it 2+ GB of memory.
+
+Railway: project "Posts", service `posts-api-src` (root `/posts`, branch `posts`), Postgres in the same project.
