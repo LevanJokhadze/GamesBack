@@ -4,7 +4,10 @@ import time
 import traceback
 
 from .. import db
+from ..integrations.buffer import RateLimited
 from . import discover, monitor, publish, render
+
+_last_limit_log: dict[str, float] = {}
 
 WORKERS = {
     # name: (function, seconds between runs)
@@ -35,6 +38,12 @@ def _loop(name: str, fn, every: int):
             try:
                 busy = fn()
                 db.q("UPDATE heartbeats SET last_ok=now() WHERE worker=%s", (name,))
+            except RateLimited as e:
+                busy = False
+                # expected and self-healing: note it once an hour, not on every run
+                if time.time() - _last_limit_log.get(name, 0) > 3600:
+                    _last_limit_log[name] = time.time()
+                    db.log(name, str(e), "warn")
             except Exception as e:
                 busy = False
                 db.q("UPDATE heartbeats SET last_error_at=now(), last_error=%s WHERE worker=%s", (str(e)[:1000], name))

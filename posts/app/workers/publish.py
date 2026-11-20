@@ -40,13 +40,21 @@ def next_slot(channel_id: str, service: str, s: dict, after: datetime) -> dateti
     raise RuntimeError("no free slot in the next 30 days")
 
 
+RETRY_AFTER = 6 * 3600  # a channel that refused a clip is not asked again for this long
+
+
 def run():
-    s = db.settings()
-    wanted = s.get("services") or ["tiktok", "instagram", "youtube"]
-    clips = db.q("""SELECT * FROM clips WHERE status IN ('approved','scheduled') AND approved_at > now() - interval '4 days'
-                    ORDER BY approved_at LIMIT 20""")
-    if not clips:
+    import time
+    if buffer.paused_until() > time.time():
         return 0
+    s = db.settings()
+    refused = {k: v for k, v in (s.get("publish_refused") or {}).items() if time.time() - v < RETRY_AFTER}
+    wanted = s.get("services") or ["tiktok", "instagram", "youtube"]
+    clips = db.q("""SELECT c.* FROM clips c WHERE c.status IN ('approved','scheduled') AND c.approved_at > now() - interval '4 days'
+                    AND (SELECT count(*) FROM posts p WHERE p.clip_id = c.id AND p.status <> 'deleted') < %s
+                    ORDER BY c.approved_at LIMIT 20""", (len(wanted),))
+    if not clips:
+        return 0  # every clip already has a post on every platform: no Buffer call needed
     order = {svc: i for i, svc in enumerate(wanted)}
     chans = sorted([ch for ch in buffer.channels() if ch["service"] in wanted and not ch.get("isQueuePaused")],
                    key=lambda ch: order.get(ch["service"], 99))
@@ -55,7 +63,7 @@ def run():
     for clip in clips:
         have = {r["channel_id"] for r in db.q("SELECT channel_id FROM posts WHERE clip_id=%s AND status <> 'deleted'",
                                               (clip["id"],))}
-        missing = [ch for ch in chans if ch["id"] not in have]
+        missing = [ch for ch in chans if ch["id"] not in have and f"{clip['id']}:{ch['id']}" not in refused]
         if not missing:
             continue
         earliest = datetime.now(timezone.utc) + timedelta(minutes=20)
@@ -67,8 +75,12 @@ def run():
             try:
                 p = buffer.create_video_post(ch, clip["video_url"], clip["title"] or "", clip["caption"] or "",
                                              due.strftime("%Y-%m-%dT%H:%M:%S.000Z"))
+            except buffer.RateLimited:
+                raise
             except Exception as e:
-                db.log("publish", f"clip #{clip['id']} on {ch['service']}: {e} (will retry at a later slot)", "warn")
+                refused[f"{clip['id']}:{ch['id']}"] = time.time()
+                db.set_setting("publish_refused", refused)
+                db.log("publish", f"clip #{clip['id']} on {ch['service']}: {e} (will try again in 6 h)", "warn")
                 continue
             db.q("""INSERT INTO posts(clip_id, campaign_id, channel_id, channel_name, service, buffer_post_id, due_at, status)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
