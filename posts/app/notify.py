@@ -1,8 +1,11 @@
-"""Email alerts over SMTP (Gmail app password): live posts to submit on Content Rewards, and failures."""
+"""Email alerts over SMTP (Gmail app password): live posts to submit on Content Rewards, failures, and upload
+reminders for accounts in manual mode."""
 import html
 import smtplib
 import ssl
+from datetime import datetime, timezone
 from email.message import EmailMessage
+from zoneinfo import ZoneInfo
 
 from . import config, db
 
@@ -89,3 +92,74 @@ def failed_posts():
             db.log("notify", f"failure email for post {p['id']} failed: {e}", "error")
             break
     return len(rows)
+
+
+UPLOAD_PAGE = {"tiktok": "https://www.tiktok.com/upload", "instagram": "https://www.instagram.com/",
+               "youtube": "https://studio.youtube.com/"}
+TBILISI = "Asia/Tbilisi"
+
+
+def _download(url: str) -> str:
+    # Vercel Blob serves the file as an attachment with ?download=1, so phones save it instead of playing it
+    return url + ("&" if "?" in url else "?") + "download=1"
+
+
+def _when(t) -> str:
+    return (f"{t.astimezone(ZoneInfo(TBILISI)):%a %d %b, %H:%M} Tbilisi "
+            f"({t.astimezone(ZoneInfo('America/New_York')):%H:%M} US Eastern)")
+
+
+def manual_day(account: dict) -> int:
+    since = account.get("manual_since") or account.get("created_at")
+    return max(1, (datetime.now(timezone.utc) - since).days + 1) if since else 1
+
+
+def manual_upload(account: dict, clip: dict, slot) -> None:
+    """'Time to upload' email for a manual account: download link, caption, platform and username."""
+    pf = LABEL.get(account["platform"], account["platform"])
+    handle = "@" + account["handle"]
+    dl = _download(clip["video_url"])
+    caption = clip["caption"] or ""
+    title = clip["title"] or ""
+    day = manual_day(account)
+    dash = f"{config.DASHBOARD_URL}/#accounts"
+    lines = [f"It's time to upload a video on {pf}.", "",
+             f"Platform: {pf}", f"Account: {handle}" + (f" ({account['profile_url']})" if account.get("profile_url") else ""),
+             f"Post at: {_when(slot)}", "",
+             f"Download the video: {dl}", ""]
+    if account["platform"] in ("youtube", "tiktok") and title:
+        lines += ["Title:", title, ""]
+    lines += ["Caption (text and hashtags, paste as is):", caption, "",
+              f"Upload here: {UPLOAD_PAGE.get(account['platform'], '')}", "",
+              f"Day {day} of manual uploads for this account." + (" It's been a week: switch it to automatic on the dashboard when you're ready." if day > 7 else ""),
+              f"After posting, add the link on the Accounts page so it counts for Content Rewards: {dash}"]
+    e = html.escape
+    title_html = (f'<p style="margin:12px 0 4px"><b>Title</b></p><pre style="white-space:pre-wrap;font-family:inherit;'
+                  f'background:#f4f4f5;padding:10px;border-radius:8px;margin:0">{e(title)}</pre>'
+                  if account["platform"] in ("youtube", "tiktok") and title else "")
+    body = (f'<p style="font-size:16px"><b>It’s time to upload a video on {e(pf)}.</b></p>'
+            f'<table cellpadding="4" style="border-collapse:collapse">'
+            f'<tr><td style="color:#666">Platform</td><td><b>{e(pf)}</b></td></tr>'
+            f'<tr><td style="color:#666">Account</td><td><b>{e(handle)}</b>'
+            + (f' (<a href="{e(account["profile_url"])}">profile</a>)' if account.get("profile_url") else "") + '</td></tr>'
+            f'<tr><td style="color:#666">Post at</td><td>{e(_when(slot))}</td></tr></table>'
+            + (f'<p><img src="{e(clip["thumb_url"])}" width="160" style="border-radius:8px"></p>' if clip.get("thumb_url") else "")
+            + f'<p><a href="{e(dl)}" style="display:inline-block;background:#111;color:#fff;padding:10px 16px;border-radius:8px;'
+              f'text-decoration:none">Download the video</a></p>'
+            + title_html
+            + f'<p style="margin:12px 0 4px"><b>Caption</b> (text and hashtags, paste as is)</p>'
+              f'<pre style="white-space:pre-wrap;font-family:inherit;background:#f4f4f5;padding:10px;border-radius:8px;margin:0">{e(caption)}</pre>'
+            + f'<p>Upload here: <a href="{e(UPLOAD_PAGE.get(account["platform"], ""))}">{e(UPLOAD_PAGE.get(account["platform"], ""))}</a></p>'
+            + f'<p style="color:#666">Day {day} of manual uploads for this account.'
+            + (" It’s been a week: switch it to automatic on the dashboard when you’re ready." if day > 7 else "")
+            + f' After posting, add the link on <a href="{dash}">the Accounts page</a> so it counts for Content Rewards.</p>')
+    send(f"Time to upload on {pf} {handle}: {title or clip['id']}", "\n".join(lines), body)
+
+
+def manual_week(account: dict) -> None:
+    pf = LABEL.get(account["platform"], account["platform"])
+    dash = f"{config.DASHBOARD_URL}/#accounts"
+    send(f"{pf} @{account['handle']}: one week of manual uploads",
+         f"@{account['handle']} on {pf} has been on manual uploads for 7 days.\n\n"
+         f"When you're ready, switch it to Automatic on the Accounts page ({dash}). It needs its Buffer channel linked; "
+         f"then the pipeline posts to it at the usual slots and the upload emails stop.\n\nNothing changes until you switch it.")

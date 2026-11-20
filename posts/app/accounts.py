@@ -10,14 +10,17 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from . import config, db
+from . import config, db, notify
+from .workers import manual
 
 router = APIRouter()
 
 PLATFORMS = ("instagram", "tiktok", "youtube")
 STATUSES = ("warming", "active", "paused", "banned", "retired")
 COLS = ("id, geo_id, platform, handle, login, profile_url, status, streamers, buffer_channel_id, followers, total_views, "
-        "total_posts, total_likes, stats_at, notes, created_at, updated_at, password_enc IS NOT NULL AS has_password")
+        "total_posts, total_likes, stats_at, notes, created_at, updated_at, upload_mode, manual_since, week_hint_at, "
+        "password_enc IS NOT NULL AS has_password")
+MODES = ("manual", "automatic")
 
 
 def _fernet() -> Fernet | None:
@@ -84,13 +87,38 @@ def _pipeline_stats(channel_ids: list[str]) -> dict[str, dict]:
 def list_accounts():
     geos = db.q("SELECT * FROM geos ORDER BY sort, id")
     accounts = db.q(f"SELECT {COLS} FROM accounts ORDER BY platform, lower(handle)")
-    stats = _pipeline_stats([a["buffer_channel_id"] for a in accounts if a["buffer_channel_id"]])
+    # an account's posts: its Buffer channel's, or the uploads recorded by hand from its reminder emails
+    key = lambda a: a["buffer_channel_id"] or f"manual:{a['id']}"
+    stats = _pipeline_stats([key(a) for a in accounts])
+    s = db.settings()
+    uploads = _manual_uploads([a["id"] for a in accounts])
     for a in accounts:
-        a["pipeline"] = stats.get(a["buffer_channel_id"]) if a["buffer_channel_id"] else None
+        a["pipeline"] = stats.get(key(a))
+        a["manual"] = None
+        if a["upload_mode"] == "manual":
+            a["manual"] = {"day": notify.manual_day(a), "uploads": uploads.get(a["id"], []),
+                           "next_at": manual.next_slot(a, s) if a["status"] in manual.LIVE_STATUSES else None}
     streamers = sorted({s for r in db.q("SELECT channels FROM campaigns") for s in (r["channels"] or [])}
                        | {s for a in accounts for s in a["streamers"]}, key=str.lower)
     return {"geos": geos, "accounts": accounts, "buffer_channels": _buffer_channels(), "streamers": streamers,
-            "encryption_ready": bool(config.ACCOUNTS_KEY)}
+            "encryption_ready": bool(config.ACCOUNTS_KEY), "email_ready": notify.enabled(),
+            "services": s.get("services") or []}
+
+
+def _manual_uploads(ids: list[int]) -> dict[int, list[dict]]:
+    if not ids:
+        return {}
+    rows = db.q("""SELECT * FROM (
+                     SELECT mu.id, mu.account_id, mu.clip_id, mu.slot_at, mu.emailed_at, mu.done_at, mu.link,
+                       c.title, c.thumb_url, c.video_url,
+                       row_number() OVER (PARTITION BY mu.account_id ORDER BY mu.slot_at DESC) AS n
+                     FROM manual_uploads mu JOIN clips c ON c.id = mu.clip_id WHERE mu.account_id = ANY(%s)) x
+                   WHERE n <= 6 ORDER BY slot_at DESC""", (ids,))
+    out: dict[int, list[dict]] = {}
+    for r in rows:
+        r.pop("n", None)
+        out.setdefault(r["account_id"], []).append(r)
+    return out
 
 
 class GeoIn(BaseModel):
@@ -145,11 +173,15 @@ class AccountIn(BaseModel):
     total_posts: int | None = None
     total_likes: int | None = None
     notes: str | None = None
+    # None = keep (new accounts start manual)
+    upload_mode: str | None = None
 
 
 def _clean(body: AccountIn) -> dict:
     if body.platform not in PLATFORMS:
         raise HTTPException(400, f"platform must be one of {', '.join(PLATFORMS)}")
+    if body.upload_mode is not None and body.upload_mode not in MODES:
+        raise HTTPException(400, "upload_mode must be manual or automatic")
     if body.status not in STATUSES:
         raise HTTPException(400, f"status must be one of {', '.join(STATUSES)}")
     if not db.one("SELECT 1 AS x FROM geos WHERE id=%s", (body.geo_id,)):
@@ -175,6 +207,7 @@ def _stats_changed(old: dict | None, new: dict) -> bool:
 @router.post("/accounts")
 def create_account(body: AccountIn):
     data = _clean(body)
+    data["upload_mode"] = body.upload_mode or "manual"
     if body.password:
         data["password_enc"] = encrypt(body.password)
     cols, vals = list(data), ["%s"] * len(data)
@@ -199,8 +232,96 @@ def update_account(aid: int, body: AccountIn):
         params.append(encrypt(body.password) if body.password else None)
     if _stats_changed(old, data):
         sets.append("stats_at=now()")
+    if body.upload_mode and body.upload_mode != old["upload_mode"]:
+        sets.append("upload_mode=%s")
+        params.append(body.upload_mode)
+        if body.upload_mode == "manual":
+            sets += ["manual_since=now()", "week_hint_at=NULL"]
     sets.append("updated_at=now()")
     db.q(f"UPDATE accounts SET {', '.join(sets)} WHERE id=%s", params + [aid])
+    if body.upload_mode and body.upload_mode != old["upload_mode"]:
+        _mode_changed({**old, **data}, body.upload_mode)
+    return {"ok": True}
+
+
+def _mode_changed(a: dict, mode: str):
+    note = ""
+    if mode == "automatic" and a.get("buffer_channel_id"):
+        # switching an account to automatic means "post to it": make sure its platform is on in the publish settings
+        services = db.settings().get("services") or []
+        if a["platform"] not in services:
+            db.set_setting("services", services + [a["platform"]])
+            note = f"; {a['platform']} turned on for publishing"
+    db.log("accounts", f"{a['platform']} @{a['handle']} switched to {mode} uploads{note}")
+
+
+class ModeIn(BaseModel):
+    upload_mode: str
+
+
+@router.post("/accounts/{aid}/mode")
+def set_mode(aid: int, body: ModeIn):
+    if body.upload_mode not in MODES:
+        raise HTTPException(400, "upload_mode must be manual or automatic")
+    old = db.one("SELECT * FROM accounts WHERE id=%s", (aid,))
+    if not old:
+        raise HTTPException(404, "account not found")
+    if old["upload_mode"] == body.upload_mode:
+        return {"ok": True}
+    if body.upload_mode == "manual":
+        db.q("UPDATE accounts SET upload_mode='manual', manual_since=now(), week_hint_at=NULL, updated_at=now() WHERE id=%s", (aid,))
+    else:
+        db.q("UPDATE accounts SET upload_mode='automatic', updated_at=now() WHERE id=%s", (aid,))
+    _mode_changed(old, body.upload_mode)
+    return {"ok": True}
+
+
+@router.post("/accounts/{aid}/upload-now")
+def upload_now(aid: int):
+    """Email this manual account its next clip right away (outside the slots)."""
+    from datetime import datetime, timezone
+    a = db.one("SELECT * FROM accounts WHERE id=%s", (aid,))
+    if not a:
+        raise HTTPException(404, "account not found")
+    if not notify.enabled():
+        raise HTTPException(400, "email is not configured on the server")
+    try:
+        row = manual.send_one(a, datetime.now(timezone.utc).replace(microsecond=0))
+    except Exception as e:
+        raise HTTPException(502, f"sending failed: {e}")
+    if not row:
+        raise HTTPException(409, "No new clip for this account: every recent clip was already sent to it")
+    return row
+
+
+class UploadDone(BaseModel):
+    link: str | None = None
+
+
+@router.post("/manual-uploads/{uid}/done")
+def upload_done(uid: int, body: UploadDone):
+    """Mark a reminder as uploaded. With a link, the upload is also recorded as a live post (Posts page, stats,
+    Content Rewards 'Submitted' tick), and is never posted to the same account by Buffer later."""
+    mu = db.one("""SELECT mu.*, a.platform, a.handle, a.buffer_channel_id, c.campaign_id FROM manual_uploads mu
+                   JOIN accounts a ON a.id = mu.account_id JOIN clips c ON c.id = mu.clip_id WHERE mu.id=%s""", (uid,))
+    if not mu:
+        raise HTTPException(404, "reminder not found")
+    link = (body.link or "").strip() or None
+    if link and not link.startswith(("http://", "https://")):
+        raise HTTPException(400, "the link must start with https://")
+    db.q("UPDATE manual_uploads SET done_at=COALESCE(done_at, now()), link=%s WHERE id=%s", (link, uid))
+    channel = mu["buffer_channel_id"] or f"manual:{mu['account_id']}"
+    existing = db.one("SELECT id FROM posts WHERE clip_id=%s AND channel_id=%s AND buffer_post_id IS NULL",
+                      (mu["clip_id"], channel))
+    if link and existing:
+        db.q("UPDATE posts SET external_link=%s, updated_at=now() WHERE id=%s", (link, existing["id"]))
+    elif link:
+        db.q("""INSERT INTO posts(clip_id, campaign_id, channel_id, channel_name, service, due_at, sent_at, status,
+                                  external_link, notified_at)
+                VALUES (%s,%s,%s,%s,%s,%s,now(),'sent',%s,now())""",
+             (mu["clip_id"], mu["campaign_id"], channel, mu["handle"], mu["platform"], mu["slot_at"], link))
+    db.log("accounts", f"manual upload of clip #{mu['clip_id']} on {mu['platform']} @{mu['handle']} marked done"
+                       + (f": {link}" if link else ""))
     return {"ok": True}
 
 

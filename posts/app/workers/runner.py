@@ -5,7 +5,7 @@ import traceback
 
 from .. import db
 from ..integrations.buffer import RateLimited
-from . import discover, monitor, publish, render
+from . import discover, manual, monitor, publish, render
 
 _last_limit_log: dict[str, float] = {}
 
@@ -15,6 +15,7 @@ WORKERS = {
     "render": (render.run, 3 * 60),
     "publish": (publish.run, 5 * 60),
     "monitor": (monitor.run, 10 * 60),
+    "manual": (manual.run, 5 * 60),
 }
 
 _wake = {name: threading.Event() for name in WORKERS}
