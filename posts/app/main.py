@@ -6,13 +6,14 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import accounts, auth, config, db, seed, submit_api
+from . import accounts, auth, calendar, config, db, seed, submit_api
 from .workers import runner
 
 app = FastAPI(title="posts.lane.ge API")
 app.add_middleware(CORSMiddleware, allow_origins=config.ALLOWED_ORIGINS, allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(accounts.router, prefix="/api", dependencies=[Depends(auth.require)])
+app.include_router(calendar.router, prefix="/api", dependencies=[Depends(auth.require)])
 app.include_router(submit_api.router)  # each route sets its own auth (the Whop callback and helper queue differ)
 
 _login_fail: dict[str, list[float]] = defaultdict(list)
