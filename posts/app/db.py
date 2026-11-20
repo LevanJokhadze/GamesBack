@@ -121,6 +121,8 @@ DEFAULT_SETTINGS = {
     # Posting slots in US Eastern time (HH:MM). Each channel gets at most one post per slot.
     "slots_et": ["12:00", "19:00", "21:00"],
     "max_posts_per_day": 3,
+    # Buffer refuses more than 2 YouTube posts a day on this channel
+    "max_per_day_by_service": {"youtube": 2},
     "stagger_minutes": 15,
     "services": ["tiktok", "instagram", "youtube"],
 }
