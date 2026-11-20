@@ -44,6 +44,13 @@ def _apply(p: dict, st: dict) -> bool:
     return True
 
 
+def seconds_to_next_due() -> float:
+    """Seconds until 4 minutes after the next scheduled post's time (when Buffer has usually published it)."""
+    r = db.one("""SELECT EXTRACT(EPOCH FROM (min(due_at) + interval '4 minutes' - now())) AS s FROM posts
+                  WHERE status NOT IN ('sent','error','deleted','draft') AND due_at > now() - interval '3 minutes'""")
+    return float(r["s"]) if r and r["s"] is not None else 10 * 60
+
+
 def run():
     if buffer.paused_until() > time.time():
         return 0  # waiting for Buffer's rate-limit window to reset

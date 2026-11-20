@@ -322,6 +322,9 @@ def upload_done(uid: int, body: UploadDone):
              (mu["clip_id"], mu["campaign_id"], channel, mu["handle"], mu["platform"], mu["slot_at"], link))
     db.log("accounts", f"manual upload of clip #{mu['clip_id']} on {mu['platform']} @{mu['handle']} marked done"
                        + (f": {link}" if link else ""))
+    if link:
+        from .workers import runner
+        runner.trigger("submit")  # auto-submit picks the new link up right away
     return {"ok": True}
 
 
