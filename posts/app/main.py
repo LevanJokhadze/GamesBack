@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import accounts, auth, calendar, config, db, seed
+from . import accounts, auth, calendar, config, db, seed, submit_api
 from .workers import runner
 
 app = FastAPI(title="posts.lane.ge API")
@@ -14,6 +14,7 @@ app.add_middleware(CORSMiddleware, allow_origins=config.ALLOWED_ORIGINS, allow_m
 
 app.include_router(accounts.router, prefix="/api", dependencies=[Depends(auth.require)])
 app.include_router(calendar.router, prefix="/api", dependencies=[Depends(auth.require)])
+app.include_router(submit_api.router)  # each route sets its own auth (the Whop callback and helper queue differ)
 
 _login_fail: dict[str, list[float]] = defaultdict(list)
 
@@ -72,12 +73,16 @@ def overview():
                          FROM posts GROUP BY service ORDER BY service""")
     upcoming = db.q("""SELECT p.id, p.service, p.channel_name, p.due_at, c.title, c.thumb_url FROM posts p
                        JOIN clips c ON c.id=p.clip_id WHERE p.status='scheduled' ORDER BY p.due_at LIMIT 8""")
-    to_submit = db.one("SELECT count(*) n FROM posts WHERE status='sent' AND external_link IS NOT NULL AND NOT submitted")["n"]
+    # live posts still waiting on the user (auto-submit's own queue is not counted)
+    to_submit = db.one("""SELECT count(*) n FROM posts WHERE status='sent' AND external_link IS NOT NULL AND NOT submitted
+                          AND COALESCE(submit_status, '') NOT IN ('pending', 'agent')""")["n"]
+    submit_failed = db.one("""SELECT count(*) n FROM posts WHERE NOT submitted AND submit_status = 'failed'
+                              AND sent_at > now() - interval '3 days'""")["n"]
     moments = {r["status"]: r["n"] for r in db.q("SELECT status, count(*) n FROM moments GROUP BY status")}
     est = db.one(EST_SQL)
     return {"clips": clips, "posts": posts, "moments": moments, "totals": tot, "est_earnings": float(est["est"]),
             "paying_posts": est["paying"],
-            "by_service": by_service, "upcoming": upcoming, "to_submit": to_submit,
+            "by_service": by_service, "upcoming": upcoming, "to_submit": to_submit, "submit_failed": submit_failed,
             "workers": db.q("SELECT * FROM heartbeats ORDER BY worker"), "settings": db.settings()}
 
 
@@ -139,7 +144,10 @@ class Submitted(BaseModel):
 
 @app.post("/api/posts/{post_id}/submitted", dependencies=[A])
 def mark_submitted(post_id: int, body: Submitted):
-    db.q("UPDATE posts SET submitted=%s WHERE id=%s", (body.submitted, post_id))
+    # ticked by hand: auto-submit leaves it alone; unticked: back to "not handled" (Submit now can retry it)
+    db.q("""UPDATE posts SET submitted=%s, submit_status=%s, submitted_at=CASE WHEN %s THEN COALESCE(submitted_at, now()) END,
+              submit_next_at=NULL WHERE id=%s""",
+         (body.submitted, "manual" if body.submitted else None, body.submitted, post_id))
     return {"ok": True}
 
 
@@ -177,7 +185,7 @@ def retry_moment(moment_id: int):
 
 CAMPAIGN_FIELDS = ["name", "url", "cpm", "min_payout", "max_payout", "channels", "game", "caption_template", "overlay_url",
                    "overlay_width", "overlay_y", "captions", "cam_box", "title_secs", "daily_quota", "min_clip_views",
-                   "lookback_hours", "rules", "active"]
+                   "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes"]
 
 
 @app.get("/api/campaigns", dependencies=[A])
@@ -211,7 +219,7 @@ def get_settings():
 @app.put("/api/settings", dependencies=[A])
 def put_settings(body: dict):
     for k, v in body.items():
-        if k in db.DEFAULT_SETTINGS:
+        if k in db.DEFAULT_SETTINGS and k not in ("auto_submit", "submit_methods"):  # those: PUT /api/submit/settings
             db.set_setting(k, v)
     return db.settings()
 

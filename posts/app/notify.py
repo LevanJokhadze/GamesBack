@@ -56,18 +56,24 @@ def live_posts():
                  f"Submit each link on Content Rewards ({first['campaign']}), one submission per link:",
                  first["campaign_url"] or "", ""]
         lines += [f"- {LABEL.get(p['service'], p['service'])}: {p['external_link']}" for p in posts]
-        lines += ["", "Some campaigns want the link within 30 minutes of posting.",
-                  f"Then tick 'Submitted' in the dashboard: {dash}"]
+        auto = db.settings().get("auto_submit")
+        lines += ["", "Auto-submit is on: the pipeline submits these now. You'll get another email only if it fails."
+                  if auto else "Some campaigns want the link within 30 minutes of posting.",
+                  f"Status per post: {dash}" if auto else f"Then tick 'Submitted' in the dashboard: {dash}"]
         items = "".join(f'<li><b>{LABEL.get(p["service"], p["service"])}</b>: <a href="{html.escape(p["external_link"])}">'
                         f'{html.escape(p["external_link"])}</a></li>' for p in posts)
         body = (f'<p>Your clip is live: <b>{html.escape(first["title"] or "")}</b></p>'
                 + (f'<p><img src="{html.escape(first["thumb_url"])}" width="160" style="border-radius:8px"></p>' if first["thumb_url"] else "")
                 + f'<p>Submit each link on <a href="{html.escape(first["campaign_url"] or "")}">{html.escape(first["campaign"] or "the campaign")}</a> '
                   f'on Content Rewards, one submission per link:</p><ul>{items}</ul>'
-                + f'<p>Some campaigns want the link within 30 minutes of posting. Then tick “Submitted” on '
-                  f'<a href="{dash}">the dashboard</a>.</p>')
+                + (f'<p><b>Auto-submit is on</b>: the pipeline submits these now. You’ll get another email only if it '
+                   f'fails. Status per post on <a href="{dash}">the dashboard</a>.</p>' if auto else
+                   f'<p>Some campaigns want the link within 30 minutes of posting. Then tick “Submitted” on '
+                   f'<a href="{dash}">the dashboard</a>.</p>'))
+        if auto:
+            lines[2] = f"Being submitted automatically to {first['campaign']}:"
         try:
-            send(f"Live now, submit on Content Rewards: {first['title']}", "\n".join(lines), body)
+            send(f"Live now{' (auto-submitting)' if auto else ', submit on Content Rewards'}: {first['title']}", "\n".join(lines), body)
         except Exception as e:
             db.log("notify", f"email for clip #{clip_id} failed: {e}", "error")
             return sent
@@ -163,3 +169,51 @@ def manual_week(account: dict) -> None:
          f"@{account['handle']} on {pf} has been on manual uploads for 7 days.\n\n"
          f"When you're ready, switch it to Automatic on the Accounts page ({dash}). It needs its Buffer channel linked; "
          f"then the pipeline posts to it at the usual slots and the upload emails stop.\n\nNothing changes until you switch it.")
+
+
+def _tbilisi(t) -> str:
+    return f"{t.astimezone(ZoneInfo(TBILISI)):%H:%M} Tbilisi ({t.astimezone(ZoneInfo(TBILISI)):%a %d %b})"
+
+
+def submit_failed(post: dict, error: str, screenshot: str | None) -> None:
+    """Auto-submit is struggling with this post: everything needed to submit it by hand before the deadline."""
+    if not enabled():
+        return
+    pf = LABEL.get(post["service"], post["service"])
+    deadline = post.get("submit_deadline")
+    left = ""
+    if deadline:
+        mins = int((deadline - datetime.now(timezone.utc)).total_seconds() // 60)
+        left = f"{mins} min left" if mins > 0 else "the deadline has passed, submit anyway"
+    page = post.get("submit_url") or post.get("campaign_url") or ""
+    dash = f"{config.DASHBOARD_URL}/#posts"
+    lines = [f"Auto-submit failed for a live {pf} post. Submit it by hand" + (f" by {_tbilisi(deadline)} ({left})." if deadline else "."),
+             "", f"Post link: {post['external_link']}", f"Campaign: {post.get('campaign') or ''} {page}", "",
+             f"Why: {error}"] + ([f"Screenshot: {screenshot}"] if screenshot else []) +             ["", "The pipeline keeps retrying until the deadline. After submitting by hand, tick it on the dashboard: " + dash]
+    e = html.escape
+    body = (f'<p style="font-size:16px"><b>Auto-submit failed: submit this {e(pf)} post by hand'
+            + (f' by {e(_tbilisi(deadline))}</b> ({e(left)})' if deadline else '</b>') + '.</p>'
+            f'<p><a href="{e(page)}" style="display:inline-block;background:#111;color:#fff;padding:10px 16px;border-radius:8px;'
+            f'text-decoration:none">Open the campaign</a></p>'
+            f'<p>Post link (paste this):</p><pre style="background:#f4f4f5;padding:10px;border-radius:8px">{e(post["external_link"])}</pre>'
+            f'<p style="color:#666">Why: {e(error)}' + (f' · <a href="{e(screenshot)}">screenshot</a>' if screenshot else "") + '</p>'
+            f'<p style="color:#666">It keeps retrying until the deadline. After submitting by hand, tick it on '
+            f'<a href="{dash}">the dashboard</a>.</p>')
+    send(f"Submit by hand{' by ' + _tbilisi(deadline) if deadline else ''}: {pf} post of {post.get('title') or 'clip'}",
+         "\n".join(lines), body)
+
+
+def session_expired(error: str) -> None:
+    """The saved Content Rewards session stopped working: at most one email a day."""
+    import time
+    if not enabled() or time.time() - float(db.settings().get("session_mail_at") or 0) < 86400:
+        return
+    db.set_setting("session_mail_at", time.time())
+    dash = f"{config.DASHBOARD_URL}/#settings"
+    try:
+        send("Auto-submit needs you: sign in to Content Rewards again",
+             f"The saved Content Rewards session no longer works ({error}).\n\nOpen contentrewards.com in your browser, "
+             f"sign in, export the cookies again and paste them under Auto-submit on the Settings page: {dash}\n\n"
+             f"Until then, posts that go live are retried and you get an email for each one to submit by hand.")
+    except Exception as e:
+        db.log("notify", f"session email failed: {e}", "error")

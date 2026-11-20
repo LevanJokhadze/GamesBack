@@ -166,6 +166,23 @@ CREATE TABLE IF NOT EXISTS manual_uploads (
   UNIQUE (account_id, clip_id)
 );
 CREATE INDEX IF NOT EXISTS manual_uploads_slot ON manual_uploads(account_id, slot_at);
+-- encrypted sign-ins the workers use (Whop tokens, browser cookies): see vault.py
+CREATE TABLE IF NOT EXISTS vault (key TEXT PRIMARY KEY, value_enc TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT now());
+-- auto-submit to Content Rewards: the campaign's Whop bounty (or submit page for the browser), and per post its state
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS whop_bounty_id TEXT;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS submit_url TEXT;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS submit_window_minutes INT DEFAULT 30;
+-- submit_status: NULL (not handled: old post or auto-submit off), pending, submitted, failed, manual (ticked by hand)
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_status TEXT;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_method TEXT;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_ref TEXT;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_error TEXT;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_attempts INT DEFAULT 0;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_next_at TIMESTAMPTZ;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_deadline TIMESTAMPTZ;
+ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_alerted_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS posts_submit ON posts(submit_status) WHERE submit_status IN ('pending', 'failed');
 """
 
 # Geos created on first start (names only, no account data)
@@ -185,6 +202,12 @@ DEFAULT_SETTINGS = {
     "max_queued_per_channel": 10,
     "stagger_minutes": 15,
     "services": ["tiktok", "instagram", "youtube"],
+    # Auto-submit live post links to Content Rewards. Methods are tried in order until one works:
+    # "api" (Whop's official API, signed in with "Connect Whop"), "browser" (headless Chrome on this server with a
+    # saved Whop session), "agent" (an outside helper, e.g. Claude in Chrome on a laptop, takes the job from
+    # /api/agent/submissions). Only posts that go live after auto-submit is turned on are handled.
+    "auto_submit": False,
+    "submit_methods": ["api", "browser", "agent"],
 }
 
 

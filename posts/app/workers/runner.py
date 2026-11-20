@@ -5,7 +5,7 @@ import traceback
 
 from .. import db
 from ..integrations.buffer import RateLimited
-from . import discover, manual, monitor, publish, render
+from . import discover, manual, monitor, publish, render, submit
 
 _last_limit_log: dict[str, float] = {}
 
@@ -16,6 +16,8 @@ WORKERS = {
     "publish": (publish.run, 5 * 60),
     "monitor": (monitor.run, 10 * 60),
     "manual": (manual.run, 5 * 60),
+    # Content Rewards wants each link within 30 minutes of going live: check every minute (cheap when idle)
+    "submit": (submit.run, 60),
 }
 
 _wake = {name: threading.Event() for name in WORKERS}
@@ -51,7 +53,13 @@ def _loop(name: str, fn, every: int):
                 db.log(name, f"crashed: {e}\n{traceback.format_exc()[-1500:]}", "error")
             if name == "render" and busy:
                 continue  # more to render: go again right away
-        _wake[name].wait(every)
+            if name == "monitor" and busy:
+                trigger("submit")  # a post just went live: submit its link now, not in a minute
+        wait = every
+        if name == "monitor":
+            # wake shortly after the next post is due, so a live post is found within minutes, not up to 10
+            wait = min(every, max(30, monitor.seconds_to_next_due()))
+        _wake[name].wait(wait)
 
 
 def start():
