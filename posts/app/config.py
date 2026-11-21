@@ -15,6 +15,9 @@ ALLOWED_ORIGINS = [o.strip() for o in (env("ALLOWED_ORIGINS", "*") or "*").split
 
 BUFFER_API_KEY = env("BUFFER_API_KEY")
 BLOB_READ_WRITE_TOKEN = env("BLOB_READ_WRITE_TOKEN")
+# Optional: a YouTube Data API v3 key (Google Cloud console). Reads public view/like/comment counts of our Shorts,
+# since Buffer's post metrics may not cover YouTube. Free: 1 quota unit per 50 videos, 10,000 units a day.
+YOUTUBE_API_KEY = env("YOUTUBE_API_KEY")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 TITLE_MODEL = env("TITLE_MODEL", "claude-haiku-5-5")
 

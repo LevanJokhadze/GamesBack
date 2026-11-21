@@ -27,6 +27,10 @@ def startup():
     seed.run()
     seed.switch_campaign()
     seed.posting_plan()
+    # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
+    if db.settings().get("stats_scope_missing"):
+        db.set_setting("stats_scope_missing", False)
+        db.set_setting("stats_at", 0)
     # a restart (deploy, crash) mid-render leaves moments marked 'rendering': put them back in the queue
     stuck = db.q("UPDATE moments SET status='new', updated_at=now() WHERE status='rendering' RETURNING id")
     if stuck:
