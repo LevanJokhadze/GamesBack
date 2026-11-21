@@ -220,7 +220,8 @@ def zoom_expr(zooms: list[tuple[float, float, float]]) -> str:
 def _sh(cmd: list[str], timeout: int = 1800) -> str:
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
-        raise RuntimeError(f"{cmd[0]} failed: {(r.stderr or r.stdout)[-800:]}")
+        raise RuntimeError(f"{cmd[0]} failed (exit {r.returncode}{', killed: out of memory?' if r.returncode == -9 else ''}): "
+                           f"{(r.stderr or r.stdout)[-800:]}")
     return r.stdout
 
 
@@ -245,16 +246,23 @@ def finish(cut: Path, out: Path, p: dict, hook_text: str, layout: str = "react",
     if lines:
         (work / "hook.ass").write_text(ass(lines, hook_y(len(lines), layout, ov_box), secs), encoding="utf-8")
     f = []
+    inputs = ["-i", str(cut)]
     if tz:
-        f += ["[0:v]split=2[v1][v2]", "[0:a]asplit=2[a1][a2]",
-              f"[v1]trim={tz[0]}:{tz[1]},setpts=PTS-STARTPTS[tv]", f"[a1]atrim={tz[0]}:{tz[1]},asetpts=PTS-STARTPTS[ta]",
-              "[v2]setpts=PTS-STARTPTS[mv]", "[a2]asetpts=PTS-STARTPTS[ma]",
+        # the teaser reads the file a second time (own input) instead of split=2: with split, every raw frame of the
+        # main part was held in memory until the teaser ended (~7 GB for an 18 s 1080x1920 clip, OOM-killed on Railway)
+        inputs += ["-i", str(cut)]
+        f += [f"[1:v]trim={tz[0]}:{tz[1]},setpts=PTS-STARTPTS[tv]", f"[1:a]atrim={tz[0]}:{tz[1]},asetpts=PTS-STARTPTS[ta]",
+              "[0:v]setpts=PTS-STARTPTS[mv]", "[0:a]asetpts=PTS-STARTPTS[ma]",
               "[tv][ta][mv][ma]concat=n=2:v=1:a=1[cv][ca]"]
         # a short white flash where the teaser ends and the clip "rewinds" to the setup
         f += [f"[cv]drawbox=x=0:y=0:w=iw:h=ih:color=white@0.55:t=fill:enable='between(t,{p['main_at']},{p['main_at'] + 0.1})'[cf]"]
         v, a = "[cf]", "[ca]"
     else:
         v, a = "[0:v]", "[0:a]"
+    # constant 30 fps before zoompan: it emits one frame per input frame at its own fps, so a 60 fps Twitch source
+    # came out twice as long (slow motion)
+    f += [f"{v}fps={FPS}[vr]"]
+    v = "[vr]"
     if punch and p.get("zooms"):
         z = zoom_expr(p["zooms"])
         zp = f"zoompan=z='{z}':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)/2':d=1:fps={FPS}"
@@ -264,10 +272,10 @@ def finish(cut: Path, out: Path, p: dict, hook_text: str, layout: str = "react",
         else:
             f += [f"{v}{zp}:s={W}x{H},setsar=1[vz]"]
         v = "[vz]"
-    inputs = ["-i", str(cut)]
     if overlay:
+        oi = len(inputs) // 2
         inputs += ["-i", str(overlay)]
-        f += [f"[1:v]scale={overlay_width}:-1[ov]", f"{v}[ov]overlay=x=(W-w)/2:y={overlay_y}:format=auto[vo]"]
+        f += [f"[{oi}:v]scale={overlay_width}:-1[ov]", f"{v}[ov]overlay=x=(W-w)/2:y={overlay_y}:format=auto[vo]"]
         v = "[vo]"
     if lines:
         sub = str(work / "hook.ass").replace("\\", "/").replace(":", "\\:")
