@@ -73,8 +73,8 @@ def render_one(c: dict, m: dict) -> int:
         job = next((work / "jobs").iterdir())
         words = json.loads((job / "transcript.json").read_text())
         transcript = " ".join(str(w.get("w", "")) for w in words if isinstance(w, dict))
-        # display name as written in the campaign name ("KreekCraft GTA 6 Clipping" -> "KreekCraft")
-        streamer = next((w for w in (c["name"] or "").split() if w.lower() == (m["channel"] or "").lower()),
+        # the campaign's streamer name, else as written in the campaign name ("KreekCraft GTA 6 Clipping" -> "KreekCraft")
+        streamer = c.get("streamer_name") or next((w for w in (c["name"] or "").split() if w.lower() == (m["channel"] or "").lower()),
                         (m["channel"] or "").capitalize())
         t = titles.make(m["title"] or "", transcript, streamer)
         title = t["title"] or (m["title"] or "")
@@ -109,7 +109,9 @@ def render_one(c: dict, m: dict) -> int:
         video_url = blob.upload(final, f"clips/{slug}-{m['id']}.mp4", "video/mp4")
         thumb_url = blob.upload(thumb, f"thumbs/{slug}-{m['id']}.jpg", "image/jpeg")
         caption = c["caption_template"].replace("{hook}", t["hook"] or title).strip()
-        auto = db.settings().get("auto_approve") and not t.get("needs_review")
+        # a new campaign's first clip always waits for review, so its layout, overlay and caption are checked once
+        first = not db.one("SELECT 1 AS x FROM clips WHERE campaign_id=%s AND approved_at IS NOT NULL LIMIT 1", (c["id"],))
+        auto = db.settings().get("auto_approve") and not t.get("needs_review") and not first
         row = db.one("""INSERT INTO clips(moment_id, campaign_id, title, caption, video_url, thumb_url, duration, status, approved_at)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                      (m["id"], c["id"], title, caption, video_url, thumb_url, dur, "approved" if auto else "review",

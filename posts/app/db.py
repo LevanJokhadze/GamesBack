@@ -172,6 +172,10 @@ CREATE TABLE IF NOT EXISTS vault (key TEXT PRIMARY KEY, value_enc TEXT NOT NULL,
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS whop_bounty_id TEXT;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS submit_url TEXT;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS submit_window_minutes INT DEFAULT 30;
+-- campaign switch: the streamer's display name (titles), and when/why a campaign ended (it stays for its history)
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS streamer_name TEXT;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS ended_at TIMESTAMPTZ;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS end_reason TEXT;
 -- submit_status: NULL (not handled: old post or auto-submit off), pending, submitted, failed, manual (ticked by hand)
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_status TEXT;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_method TEXT;

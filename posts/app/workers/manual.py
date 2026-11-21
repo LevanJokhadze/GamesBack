@@ -57,7 +57,7 @@ def pick_clip(account: dict, exclude: list[int] | None = None) -> dict | None:
     streamers = [x.lower() for x in account.get("streamers") or []]
     return db.one("""
         SELECT c.*, ca.name AS campaign, ca.url AS campaign_url FROM clips c LEFT JOIN campaigns ca ON ca.id = c.campaign_id
-        WHERE c.status IN ('approved','scheduled','posted') AND c.video_url IS NOT NULL
+        WHERE c.status IN ('approved','scheduled','posted') AND c.video_url IS NOT NULL AND COALESCE(ca.active, TRUE)
           AND c.approved_at > now() - interval '4 days'
           AND NOT (c.id = ANY(%(ex)s::int[]))
           AND NOT EXISTS (SELECT 1 FROM manual_uploads mu WHERE mu.account_id = %(a)s AND mu.clip_id = c.id)

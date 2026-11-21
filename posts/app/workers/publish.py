@@ -53,7 +53,9 @@ def run():
     refused = {k: v for k, v in (s.get("publish_refused") or {}).items() if time.time() - v < RETRY_AFTER}
     wanted = s.get("services") or ["tiktok", "instagram", "youtube"]
     # only Buffer posts on the enabled platforms count here: a clip uploaded by hand somewhere still goes out on the rest
-    clips = db.q("""SELECT c.* FROM clips c WHERE c.status IN ('approved','scheduled') AND c.approved_at > now() - interval '4 days'
+    # only clips of active campaigns: an ended campaign's leftover clips would use up the day's few posting slots
+    clips = db.q("""SELECT c.* FROM clips c JOIN campaigns ca ON ca.id = c.campaign_id AND ca.active
+                    WHERE c.status IN ('approved','scheduled') AND c.approved_at > now() - interval '4 days'
                     AND (SELECT count(*) FROM posts p WHERE p.clip_id = c.id AND p.status <> 'deleted'
                          AND p.buffer_post_id IS NOT NULL AND p.service = ANY(%s)) < %s
                     ORDER BY c.approved_at LIMIT 20""", (wanted, len(wanted)))
