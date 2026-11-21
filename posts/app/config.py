@@ -20,6 +20,8 @@ BLOB_READ_WRITE_TOKEN = env("BLOB_READ_WRITE_TOKEN")
 YOUTUBE_API_KEY = env("YOUTUBE_API_KEY")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 TITLE_MODEL = env("TITLE_MODEL", "claude-haiku-5-5")
+# Look at each source clip for nudity before cutting it (integrations/safety.py). NUDITY_CHECK=0 turns it off.
+NUDITY_CHECK = env("NUDITY_CHECK", "1") != "0"
 
 # Encrypts social account passwords stored in the database (any long random string; never change it once set,
 # or saved passwords can no longer be read)

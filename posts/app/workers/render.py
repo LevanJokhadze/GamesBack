@@ -16,7 +16,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import captions, config, db, hook
-from ..integrations import blob, titles
+from ..integrations import blob, safety, titles
 
 ET = ZoneInfo("America/New_York")
 
@@ -34,26 +34,33 @@ def rendered_today(campaign_id: int) -> int:
                   (campaign_id, start))["n"]
 
 
+SKIPS_PER_RUN = 8   # moments one run may pass over (nudity, no speech, ...) before it gives the other workers a turn
+
+
 def run():
     for c in db.q("SELECT * FROM campaigns WHERE active ORDER BY id"):
         if rendered_today(c["id"]) >= (c["daily_quota"] or 0):
             continue
-        m = db.one("""UPDATE moments SET status='rendering', updated_at=now() WHERE id = (
-                        SELECT id FROM moments WHERE campaign_id=%s AND status='new' ORDER BY views DESC LIMIT 1
-                        FOR UPDATE SKIP LOCKED) RETURNING *""", (c["id"],))
-        if not m:
-            continue
-        try:
-            clip_id = render_one(c, m)
-            db.q("UPDATE moments SET status='rendered', updated_at=now() WHERE id=%s", (m["id"],))
-            db.log("render", f"clip #{clip_id} ready: {m['title']!r} ({m['views']} views on Twitch)")
-        except Skip as e:
-            db.q("UPDATE moments SET status='skipped', reason=%s, updated_at=now() WHERE id=%s", (str(e)[:500], m["id"]))
-            db.log("render", f"skipped {m['external_id']}: {e}", "warn")
-        except Exception as e:
-            db.q("UPDATE moments SET status='failed', reason=%s, updated_at=now() WHERE id=%s", (str(e)[:500], m["id"]))
-            db.log("render", f"failed {m['external_id']}: {e}", "error")
-        return True  # one clip per run
+        for _ in range(SKIPS_PER_RUN):
+            m = db.one("""UPDATE moments SET status='rendering', updated_at=now() WHERE id = (
+                            SELECT id FROM moments WHERE campaign_id=%s AND status='new' ORDER BY views DESC LIMIT 1
+                            FOR UPDATE SKIP LOCKED) RETURNING *""", (c["id"],))
+            if not m:
+                break
+            try:
+                clip_id = render_one(c, m)
+                db.q("UPDATE moments SET status='rendered', updated_at=now() WHERE id=%s", (m["id"],))
+                db.log("render", f"clip #{clip_id} ready: {m['title']!r} ({m['views']} views on Twitch)")
+            except Skip as e:
+                db.q("UPDATE moments SET status='skipped', reason=%s, updated_at=now() WHERE id=%s", (str(e)[:500], m["id"]))
+                db.log("render", f"skipped {m['external_id']}: {e}", "warn")
+                continue  # the next best moment of this campaign
+            except Exception as e:
+                db.q("UPDATE moments SET status='failed', reason=%s, updated_at=now() WHERE id=%s", (str(e)[:500], m["id"]))
+                db.log("render", f"failed {m['external_id']}: {e}", "error")
+            return True  # one clip per run
+        else:
+            return True  # only skips so far: go again right away
     return False
 
 
@@ -87,6 +94,11 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     sh([sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1080,fps", "-f", SOURCE_FORMAT,
         "-o", str(src), m["url"]], timeout=600)
     src_res = hook.resolution(src)
+    # nudity gets a TikTok strike and a YouTube age restriction: such a moment is never cut
+    safe = safety.check(src)
+    if safe["verdict"] == "nudity":
+        at = ", ".join(f"{x:.0f}s" for x in safe["at"][:4])
+        raise Skip(f"nudity{' at ' + at if at else ''}: {safe['what']}".strip(": "))
     sh([sys.executable, str(config.VENDOR / "moments.py"), str(src), "--top", "1", "--min", "5", "--max", "60"],
        cwd=work, env=env)
     job = next((work / "jobs").iterdir())
@@ -101,6 +113,9 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     t = titles.make(m["title"] or "", transcript, streamer, words=words, cands=cands, language=c.get("language") or "en")
     if screen:  # re-render: keep the on-screen hook the clip already has
         t["screen"] = screen
+    t["safety"] = safe
+    if safe["verdict"] in ("revealing", "unsure"):  # a person decides: never auto-approved
+        t["needs_review"] = True
     plain = t["title"] or (m["title"] or "")
     t["hook"] = t.get("hook") or plain  # never the templated title: the caption template repeats its own wrapper
     title = apply_title_template(c, plain)
@@ -142,6 +157,11 @@ def render_one(c: dict, m: dict) -> int:
     try:
         b = build(c, m, work)
         final, dur, title, t, plan, cands = b["final"], b["duration"], b["title"], b["texts"], b["plan"], b["candidates"]
+        safe = t.get("safety") or {}
+        if safe.get("verdict") == "revealing":
+            db.log("render", f"{m['external_id']}: revealing but not nudity ({safe.get('what')}); the clip waits in Review", "warn")
+        elif safe.get("verdict") == "unsure":
+            db.log("render", f"{m['external_id']}: the nudity check could not run ({safe.get('what')}); the clip waits in Review", "warn")
         if t.get("why"):
             db.log("render", f"{m['external_id']}: the title writer's texts were not used ({t['why']}); "
                              f"the clip waits in Review with a stand-in title", "warn")
@@ -161,7 +181,8 @@ def render_one(c: dict, m: dict) -> int:
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                      (m["id"], c["id"], title, caption, video_url, thumb_url, dur, "approved" if auto else "review",
                       datetime.now(timezone.utc) if auto else None, t.get("screen") or None,
-                      json.dumps({**plan, "candidates": cands, "payoff_by": "model" if t.get("payoff") is not None else "audio"})))
+                      json.dumps({**plan, "candidates": cands, "safety": safe,
+                                  "payoff_by": "model" if t.get("payoff") is not None else "audio"})))
         return row["id"]
     finally:
         shutil.rmtree(work, ignore_errors=True)
