@@ -291,8 +291,8 @@ RU_CAMPAIGNS = [
 
 def russian_campaigns():
     """Once: Evelone's and Strogo's Telegram clip contests as Russian-language campaigns for the RU geo only (the
-    Russian YouTube channel, manual uploads), any game, whole-frame layout. They start switched off; turn them on
-    on the Campaigns page after joining their Telegram channels."""
+    Russian YouTube channel, manual uploads), any game, whole-frame layout. Active from the start (the user joined
+    both Telegram channels on 21 Nov 2026); each one's first clip waits in Review."""
     key = "russian_campaigns_2026_11_21"
     if db.settings().get(key):
         return
@@ -301,7 +301,7 @@ def russian_campaigns():
             continue
         db.q("""INSERT INTO campaigns(name, url, cpm, min_payout, max_payout, channels, streamer_name, game, caption_template,
                   title_template, rules, language, geo, layout, captions, daily_quota, min_clip_views, lookback_hours, active)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,'ru','RU','blur','word',2,300,48,FALSE)""",
+                VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,'ru','RU','blur','word',2,300,48,TRUE)""",
              (name, url, cpm, mn, mx, [login], streamer, caption, title_tpl, rules))
     db.set_setting(key, True)
-    db.log("seed", "added the Evelone and Strogo clip contests (Russian, RU geo only, switched off until you join)")
+    db.log("seed", "added the Evelone and Strogo clip contests (Russian, RU geo only, active; first clip of each waits in Review)")
