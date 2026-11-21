@@ -248,3 +248,12 @@ def boeshi_campaign():
     db.set_setting(BOESHI_KEY, True)
     db.log("seed", "Boeshi GTA 6 is now active next to DiegoLoveless ($1/1K, min 3,000 views), with his required "
                    "Twitch overlay and twitch.tv/darealboeshi in the caption")
+
+
+def retry_oom_renders():
+    """Once: moments whose render was OOM-killed (empty "ffmpeg failed:" before the 21 Nov fix) go back to the queue."""
+    if db.settings().get("retry_oom_renders_2026_11_21"):
+        return
+    db.q("""UPDATE moments SET status='new', reason=NULL, updated_at=now()
+            WHERE status='failed' AND reason LIKE 'ffmpeg failed:%%' AND updated_at > now() - interval '2 days'""")
+    db.set_setting("retry_oom_renders_2026_11_21", True)

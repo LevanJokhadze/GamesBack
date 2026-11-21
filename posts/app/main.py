@@ -33,6 +33,7 @@ def startup():
     seed.whole_frame_layout()
     seed.diego_campaign()
     seed.boeshi_campaign()
+    seed.retry_oom_renders()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)
