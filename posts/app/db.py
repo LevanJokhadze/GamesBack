@@ -204,6 +204,15 @@ ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en';
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS geo TEXT;
 -- post title wrapper: '{title}' or e.g. 'twitch: evelone2004 {title} #evelone' when a brief wants it in the title
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS title_template TEXT DEFAULT '{title}';
+-- sponsor banner clips (BigBalls Partners): the banner video (green screen MP4 or MOV with alpha) inserted at the
+-- payoff with the clip paused (app/banner.py), its width in px, the key colour ('' = auto), and the bottom videos
+-- of the split layout ('{}' = our own loops, app/loops.py). A campaign with a banner only goes to accounts that
+-- take banner clips (accounts.banners), so a sponsor ad never lands on an account by accident.
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS banner_url TEXT;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS banner_width INT DEFAULT 1000;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS banner_key TEXT;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS bottom_urls TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS banners BOOLEAN NOT NULL DEFAULT FALSE;
 """
 
 # Geos created on first start (names only, no account data)

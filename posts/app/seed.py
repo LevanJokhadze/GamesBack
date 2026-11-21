@@ -305,3 +305,38 @@ def russian_campaigns():
              (name, url, cpm, mn, mx, [login], streamer, caption, title_tpl, rules))
     db.set_setting(key, True)
     db.log("seed", "added the Evelone and Strogo clip contests (Russian, RU geo only, active; first clip of each waits in Review)")
+
+
+BIGBALLS_BRIEF = """BigBalls Partners (Telegram bot @Bigballs_tiktok_bot, creators channel @csdogTikTok, read 22 Nov 2026):
+- Pay per 1,000 views, TikTok / YouTube Shorts: CS2 banner $0.80 / $0.60 (CS2 at least 60% of the video), non-CS2
+  banner (streamer clips, IRL) $0.50 / $0.30, banner creatives $0.20, song $0.50 / $0.30, GTA VI case-opening
+  site content $2.00 (TikTok only). One video is paid in one format only, and not also by a streamer contest.
+- Banner: centred, 30%+ of the screen, its voiceover clearly audible, not before 0:10 (under 10 s: the middle),
+  again every minute, main video paused while it plays, at most 1.2x speed. Banner files: @csdogTikTok post 113
+  (RU and ENG, MP4 green screen or MOV).
+- Not paid: bought views, paid promotion, photo posts/slideshows, voiced Reddit stories, films and series, any other
+  ad or project in the same video.
+- Submit in the bot once a video has 5,000+ views, within 14 days, with a screen recording of the stats. Only the
+  share of viewers who watched past the banner is paid (retention graph). Payout USDT TRC20/TON, min $25 (bot).
+- TikTok's rules ban marketing gambling-like sites: banner clips only go to accounts marked "Banner clips"."""
+
+
+def bigballs_campaign():
+    """Once: the BigBalls banner campaign (RU streamer clips, split screen, Russian), off until its banner video is
+    uploaded on the Campaigns page; and the Evelone and Strogo contests move to the split-screen layout (streamer on
+    top, a satisfying loop below), the format that gets @busterenus 300K-1.3M views on these streamers."""
+    key = "bigballs_campaign_2026_11_22"
+    if db.settings().get(key):
+        return
+    url = "https://t.me/Bigballs_tiktok_bot"
+    if not db.one("SELECT 1 AS x FROM campaigns WHERE url=%s", (url,)):
+        db.q("""INSERT INTO campaigns(name, url, cpm, min_payout, max_payout, channels, streamer_name, game, caption_template,
+                  title_template, rules, language, geo, layout, captions, daily_quota, min_clip_views, lookback_hours,
+                  target_secs, submit_url, active)
+                VALUES ('BigBalls banner (streamer clips)', %s, 0.5, 2.5, NULL, %s, NULL, NULL, '{hook} #нарезки #стрим',
+                        '{title}', %s, 'ru', 'RU', 'split', 'word', 2, 300, 72, 25, %s, FALSE)""",
+             (url, ["evelone2004", "buster", "strogo"], BIGBALLS_BRIEF, url))
+    db.q("UPDATE campaigns SET layout='split' WHERE url IN ('https://t.me/EveloneTiktok', 'https://t.me/strogotiktok')")
+    db.set_setting(key, True)
+    db.log("seed", "added the BigBalls banner campaign (off until its banner is uploaded) and moved Evelone and Strogo "
+                   "to the split-screen layout")

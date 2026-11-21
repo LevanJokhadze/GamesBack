@@ -3,7 +3,7 @@
 1080x1920, 30 fps, word-by-word burned captions (slurs and swears masked), hook box in the first seconds,
 loudness normalised to -14 LUFS. Writes jobs/<id>/edits/clip_<n>.mp4 + .json (metadata for check.py).
 
-usage: python cut.py jobs/<id> --pick 1 [--layout fill|blur|facecam|react] [--hook "TEXT"]
+usage: python cut.py jobs/<id> --pick 1 [--layout fill|blur|facecam|react|split] [--bottom loop.mp4] [--hook "TEXT"]
                      [--cam auto|x:y:w:h] [--title "TEXT" --title-style box|outline --title-secs 0] [--captions word|bubble|none]
 """
 import argparse, sys
@@ -114,7 +114,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     return hdr + "\n".join(ev) + "\n"
 
 
-CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560}
+CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560, "split": 1010}
 TOP = 730  # react layout: face panel height = seam y (even)
 GAME_H = H - TOP  # 1190
 # Twitch clips are soft (1080p HEVC at ~3.5 Mbps) and the react layout blows the cam up 2-3x and the game ~1.1x
@@ -127,8 +127,10 @@ def even(n):
     return int(n) // 2 * 2
 
 
-def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x=None, face_expr=None):
-    """Layout + burned-caption filter graph ending in [vo]. Reused by translate.py."""
+def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x=None, face_expr=None, dur=None):
+    """Layout + burned-caption filter graph ending in [vo]. Reused by translate.py.
+    split: the streamer (webcam crop, else the whole frame on a blurred band) in the top TOP px and input 1 (a muted
+    satisfying loop, already looped and seeked by the caller) below it."""
     if layout == "fill":
         v = f"[0:v]scale=-2:{H},crop={W}:{H}[v]"
     elif layout == "blur":
@@ -151,6 +153,23 @@ def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x
             y0, bh, secs = band
             en = f":enable='lte(t,{secs})'" if secs > 0 else ''
             v = v[:-3] + f"[v0];[v0]drawbox=x=0:y={y0}:w=iw:h={bh}:color=white@1:t=fill{en}[v]"
+    elif layout == 'split':
+        bot = (f"[1:v]scale={W}:{GAME_H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{GAME_H},"
+               f"fps=30,setsar=1,trim=duration={dur:.3f},setpts=PTS-STARTPTS[bot]")
+        if cam or face_expr:
+            if face_expr:
+                cw, chh, ex, ey = face_expr
+                top = f"crop={cw}:{chh}:{ex}:{ey}"
+            else:
+                sw, sh = src
+                x, y, w, h = map(float, cam.split(':'))
+                top = f"crop={even(sw * w)}:{even(sh * h)}:{even(sw * x)}:{even(sh * y)}"
+            v = (f"[0:v]{top},scale={W}:{TOP}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{TOP},"
+                 f"{SHARP_CAM},fps=30,setsar=1[cam];{bot};[cam][bot]vstack=shortest=1[v]")
+        else:  # no webcam: the whole stream frame (1080x608) on a blurred copy of itself
+            v = (f"[0:v]split[a][b];[a]scale=-2:{TOP},crop={W}:{TOP},boxblur=24:2,eq=brightness=-0.08[bg];"
+                 f"[b]scale={W}:-2:flags=lanczos,{SHARP_CAM}[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,fps=30,setsar=1[cam];"
+                 f"{bot};[cam][bot]vstack=shortest=1[v]")
     else:
         x, y, w, h = map(float, cam.split(":"))
         v = (f"[0:v]split[a][b];[a]crop=iw*{w}:ih*{h}:iw*{x}:ih*{y},scale={W}:{int(H * 0.38)}:force_original_aspect_ratio=increase,"
@@ -203,7 +222,9 @@ def game_offset(video, s0, e0, src, cam_box):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("job"); ap.add_argument("--pick", type=int, default=1)
-    ap.add_argument("--layout", choices=["fill", "blur", "facecam", "react"], default="blur")
+    ap.add_argument("--layout", choices=["fill", "blur", "facecam", "react", "split"], default="blur")
+    ap.add_argument("--bottom", default="", help="split layout: the video for the bottom panel (looped, muted)")
+    ap.add_argument("--bottom-ss", type=float, default=0, help="split layout: where to start in the bottom video")
     ap.add_argument("--title", default="", help="reaction title, e.g. 'Speed REALIZED why GTA 6 took 13 YEARS'")
     ap.add_argument("--title-style", choices=["box", "outline"], default="box")
     ap.add_argument("--title-secs", type=float, default=0, help="0 = whole clip")
@@ -220,7 +241,22 @@ def main():
     out = d / "edits"; out.mkdir(exist_ok=True)
     layout, cam, side = a.layout, a.cam, 'right'
     face_expr = None
-    if layout in ('react', 'facecam') and cam == 'auto':
+    if layout == 'split' and not a.bottom:
+        sys.exit("split layout needs --bottom")
+    if layout == 'split' and cam == 'auto':
+        # the streamer's webcam on top when there is one, else the whole stream frame: a split clip is never skipped
+        try:
+            from facecam import find_cam
+            r = find_cam(c['source'], s0, e0)
+        except Exception as e:
+            r = {'mode': 'none', 'reason': str(e)}
+        if r.get('mode') == 'cam':
+            cam = ':'.join(f'{v:.4f}' for v in r['box'])
+            print(f"facecam: cam box {cam} ({r.get('summary', '')})")
+        else:
+            cam = ''
+            print(f"facecam: no webcam box ({r.get('reason', r.get('mode'))}), the whole frame goes on top")
+    elif layout in ('react', 'facecam') and cam == 'auto':
         from facecam import find_cam
         r = find_cam(c['source'], s0, e0)
         if layout == 'react' and r.get('mode') not in ('cam', 'face'):
@@ -270,14 +306,19 @@ def main():
     cap_words = words if caps != 'none' else []
     ass.write_text(build_ass(cap_words, s0, e0, a.hook, cap_y, title=title, caps=caps, profanity=a.allow_profanity), encoding="utf-8")
     src = None; gx = None
+    if layout == 'split' and cam:
+        from common import ffprobe
+        vs = [x for x in ffprobe(c['source'])['streams'] if x.get('codec_type') == 'video'][0]
+        src = (int(vs['width']), int(vs['height']))
     if layout == 'react':
         from common import ffprobe
         vs = [x for x in ffprobe(c['source'])['streams'] if x.get('codec_type') == 'video'][0]
         src = (int(vs['width']), int(vs['height']))
         gx = game_offset(c['source'], s0, e0, src, [float(t) for t in cam.split(':')])
-    v = video_filter(layout, cam, ass, band=band, cam_side=side, src=src, game_x=gx, face_expr=face_expr)
+    v = video_filter(layout, cam, ass, band=band, cam_side=side, src=src, game_x=gx, face_expr=face_expr, dur=e0 - s0)
     mp4 = out / f"clip_{a.pick}.mp4"
-    run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{s0:.2f}", "-to", f"{e0:.2f}", "-i", c["source"],
+    extra = ["-stream_loop", "-1", "-ss", f"{a.bottom_ss:.2f}", "-i", a.bottom] if layout == 'split' else []
+    run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{s0:.2f}", "-to", f"{e0:.2f}", "-i", c["source"], *extra,
          "-filter_complex", v, "-map", "[vo]", "-map", "0:a?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
          # near-lossless: this file is only an intermediate, the posts app (hook.finish) encodes the final once more
          "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
