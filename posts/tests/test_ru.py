@@ -50,3 +50,35 @@ def test_geo_slots_use_the_geo_timezone():
     assert [t.strftime("%H:%M") for t in ru] == ["12:00", "17:00"]            # 15:00 and 20:00 Moscow, in UTC
     us = [t for t in manual.slot_times(s, now) if t.date() == now.date()]
     assert [t.strftime("%H:%M") for t in us] == ["17:00", "20:00"]            # 12:00 and 15:00 US Eastern, in UTC
+
+
+def test_a_number_as_clip_title_never_becomes_the_post_title(monkeypatch):
+    """The Evelone clip titled '2848481' went out as 'twitch: evelone2004 2848481 #evelone' with the wrapper twice
+    in the caption."""
+    from app import config
+    t = titles._fallback("2848481", "Evelone", "ru")
+    assert "2848481" not in t["title"] and "Evelone" in t["title"] and t["hook"] and t["needs_review"]
+    assert titles._fallback("", "Boeshi")["title"].startswith("Boeshi")
+    c = {"title_template": "twitch: evelone2004 {title} #evelone"}
+    caption = "twitch: evelone2004 {hook} #evelone".replace("{hook}", t["hook"])
+    assert render.apply_title_template(c, t["title"]).count("twitch:") == 1 and caption.count("twitch:") == 1
+
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "k")
+    asked = []
+
+    def empty_then_written(prompt):
+        asked.append(prompt)
+        return {"title": ""} if len(asked) == 1 else {"title": "Эвелон встретил старого знакомого", "hook": "Узнали? 👀",
+                                                      "screen": "ОН ВЕРНУЛСЯ", "payoff": "A"}
+    monkeypatch.setattr(titles, "_ask", empty_then_written)
+    t = titles.make("2848481", "нико беллик", "Evelone", cands=[{"t": 3.0, "text": "нико"}], language="ru")
+    assert t["title"] == "Эвелон встретил старого знакомого" and t["payoff"] == 0 and t["needs_review"] and not t["why"]
+    assert titles.THIN in asked[1] and titles.THIN not in asked[0]
+
+    def broken(prompt):
+        raise RuntimeError("HTTP 529 overloaded")
+    monkeypatch.setattr(titles, "_ask", broken)
+    t = titles.make("2848481", "", "Evelone", language="ru")
+    assert "2848481" not in t["title"] and "HTTP 529" in t["why"]
+    t = titles.make("Эвелон не ожидал такого от чата", "", "Эвелон", language="ru")
+    assert t["title"] == "Эвелон не ожидал такого от чата" and t["why"]
