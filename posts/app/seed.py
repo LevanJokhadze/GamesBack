@@ -41,3 +41,52 @@ def run():
                 VALUES (%s,%s,%s,%s,%s,%s,%s,'scheduled') ON CONFLICT (buffer_post_id) DO NOTHING""",
              (cl["id"], c["id"], ch, name, svc, bid, due))
     db.log("seed", "KreekCraft campaign created; crocodile clip imported with its 3 scheduled posts")
+
+
+# --- 21 Nov 2026: KreekCraft cut his rate to $0.50 per 1K mid-campaign; switch to Bobby VanRiper's GTA VI campaign ---
+SWITCH_KEY = "campaign_switch_2026_11_21"
+
+BOBBY_RULES = """Content Rewards / Clipping Nation brief (read 21 Nov 2026):
+- "Get paid to clip Bobby VanRiper's GTA VI content." Source: twitch.tv/bobby_vanriper (also youtube.com/@bobbyvanriper).
+- $1.50 per 1K views, min payout $2.25 (1,500 views), max $150 per clip. Budget $1,000 ($35 used on 21 Nov).
+- TikTok, Instagram and YouTube. Content Rewards rules: post from a connected account, submit within 30 min.
+- The brief's reference files (2) open only after joining: check them for a required overlay or caption line and
+  set overlay_url / caption_template here if they ask for one."""
+
+BOESHI_RULES = """Content Rewards / ClipLaunch brief (read 21 Nov 2026). Backup campaign, off until turned on:
+- Boeshi's funniest GTA 6 Twitch moments (reactions, police chases, chaos); drive viewers back to his live streams.
+- Source: twitch.tv/darealboeshi. $1 per 1K views, min payout $3, max $300. Budget $1,750 ($47 used on 21 Nov).
+- TikTok, Instagram and YouTube. Reference file (1) opens after joining."""
+
+
+def switch_campaign():
+    """Once: mark KreekCraft ended (its data and posts stay; live posts are still submitted and counted at the new
+    rate) and add Bobby VanRiper as the active campaign, with Boeshi as an inactive backup."""
+    if db.settings().get(SWITCH_KEY):
+        return
+    db.q("""UPDATE campaigns SET cpm=0.5, min_payout=2.5, max_payout=500, active=FALSE, ended_at=now(),
+              streamer_name='KreekCraft',
+              end_reason='Rate cut from $1 to $0.50 per 1K views on 20 Nov 2026, mid-campaign. Stopped cutting new clips.'
+            WHERE 'kreekcraft' = ANY(channels) AND ended_at IS NULL""")
+    add = [("BOBBY VAN RIPER GTA VI Clipping", "https://contentrewards.com/c/campaigns/f583b069-ced7-49e5-9ed3-2d3a13d6df0c",
+            ["bobby_vanriper"], "Bobby VanRiper", 1.5, 2.25, 150,
+            "{hook} Watch Bobby VanRiper live on Twitch! #GTA6 #GTAVI #BobbyVanRiper", BOBBY_RULES, True),
+           ("Boeshi GTA 6 Clipping", "https://contentrewards.com/c/campaigns/5c01ecdb-a148-4489-ba26-5aadbbb5bf69",
+            ["darealboeshi"], "Boeshi", 1, 3, 300,
+            "{hook} Catch Boeshi live on Twitch! #GTA6 #GTAVI #Boeshi", BOESHI_RULES, False)]
+    for name, url, channels, streamer, cpm, mn, mx, caption, rules, active in add:
+        if db.one("SELECT 1 AS x FROM campaigns WHERE url=%s", (url,)):
+            continue
+        # no overlay and no fixed webcam box (found per clip); word captions; 3 clips a day to match posting slots
+        db.q("""INSERT INTO campaigns(name, url, cpm, min_payout, max_payout, channels, streamer_name, game,
+                  caption_template, overlay_url, captions, cam_box, title_secs, daily_quota, min_clip_views, lookback_hours,
+                  rules, active, submit_window_minutes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,'Grand Theft Auto VI',%s,NULL,'word',NULL,5,3,50,72,%s,%s,30)""",
+             (name, url, cpm, mn, mx, channels, streamer, caption, rules, active))
+    # accounts limited to KreekCraft clips also take the new streamer's
+    db.q("""UPDATE accounts SET streamers = array_append(streamers, 'bobby_vanriper')
+            WHERE EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'kreekcraft')
+              AND NOT EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'bobby_vanriper')""")
+    db.set_setting(SWITCH_KEY, True)
+    db.log("seed", "KreekCraft campaign ended (rate cut to $0.50/1K); Bobby VanRiper GTA VI is now the active campaign, "
+                   "Boeshi added as an inactive backup")

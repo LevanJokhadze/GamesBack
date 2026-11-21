@@ -23,6 +23,7 @@ _login_fail: dict[str, list[float]] = defaultdict(list)
 def startup():
     db.migrate()
     seed.run()
+    seed.switch_campaign()
     # a restart (deploy, crash) mid-render leaves moments marked 'rendering': put them back in the queue
     stuck = db.q("UPDATE moments SET status='new', updated_at=now() WHERE status='rendering' RETURNING id")
     if stuck:
@@ -83,7 +84,9 @@ def overview():
     return {"clips": clips, "posts": posts, "moments": moments, "totals": tot, "est_earnings": float(est["est"]),
             "paying_posts": est["paying"],
             "by_service": by_service, "upcoming": upcoming, "to_submit": to_submit, "submit_failed": submit_failed,
-            "workers": db.q("SELECT * FROM heartbeats ORDER BY worker"), "settings": db.settings()}
+            "workers": db.q("SELECT * FROM heartbeats ORDER BY worker"), "settings": db.settings(),
+            "campaigns": db.q("""SELECT id, name, url, cpm, min_payout, max_payout, active, ended_at, end_reason
+                                 FROM campaigns ORDER BY active DESC, ended_at IS NOT NULL, id DESC""")}
 
 
 @app.get("/api/clips", dependencies=[A])
@@ -185,12 +188,13 @@ def retry_moment(moment_id: int):
 
 CAMPAIGN_FIELDS = ["name", "url", "cpm", "min_payout", "max_payout", "channels", "game", "caption_template", "overlay_url",
                    "overlay_width", "overlay_y", "captions", "cam_box", "title_secs", "daily_quota", "min_clip_views",
-                   "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes"]
+                   "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes",
+                   "streamer_name", "ended_at", "end_reason"]
 
 
 @app.get("/api/campaigns", dependencies=[A])
 def campaigns():
-    return db.q("SELECT * FROM campaigns ORDER BY id")
+    return db.q("SELECT * FROM campaigns ORDER BY active DESC, ended_at IS NOT NULL, id DESC")
 
 
 @app.post("/api/campaigns", dependencies=[A])
