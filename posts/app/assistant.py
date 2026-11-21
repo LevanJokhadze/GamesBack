@@ -77,11 +77,11 @@ def diagnose(p: dict, s: dict, now: datetime) -> dict:
     if manual_post:
         return {"kind": "untracked", "why": "Uploaded by hand: the pipeline can't read its views.",
                 "fix": "Open the post to see its real views. If it really is at 0: " + FIXES.get(p.get("service"), "")}
-    if s.get("stats_scope_missing"):
+    if s.get("stats_scope_missing") and not (p.get("service") == "youtube" and p.get("metrics_at")):
         return {"kind": "untracked", "why": "Views aren't tracked: the Buffer API key has no insights permission, so "
                 "every Buffer post shows 0.",
-                "fix": "Make a new Buffer key with the insights/metrics permission, put it in Railway (BUFFER_API_KEY) "
-                       "and clear stats_scope_missing. Meanwhile open the post to see its real views."}
+                "fix": "Make a new Buffer key with the insightsRead permission ticked and put it in Railway "
+                       "(BUFFER_API_KEY); the redeploy tests it on its own. Meanwhile open the post to see its real views."}
     if not p.get("metrics_at"):
         return {"kind": "unsynced", "why": "Its stats haven't been synced from Buffer yet.",
                 "fix": "Run the monitor worker, or wait for the next stats sync (every 12 h)."}

@@ -5,10 +5,14 @@ Kept cheap because Buffer's free plan allows ~100 requests a day on average (3,0
 - one list request for all channels once posts are due,
 - stats in one list request at most every 12 hours.
 """
+import json
+import re
 import time
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from .. import db, notify
+from .. import config, db, notify
 from ..integrations import buffer
 
 FIELDS = {"views": ("view", "views", "plays", "video_views", "impressions"),
@@ -18,6 +22,7 @@ FIELDS = {"views": ("view", "views", "plays", "video_views", "impressions"),
           "saves": ("save", "saves", "favorites")}
 
 STATS_EVERY = 12 * 3600
+YT_EVERY = 3600
 SYNC_EVERY = 2 * 3600  # also look every 2 h while posts are queued, to catch "Publish Now", edits and deletions in Buffer
 
 
@@ -29,6 +34,42 @@ def _pick(metrics: list[dict]) -> dict:
             if f not in out and any(n in key.split() or key.endswith(n) for n in names):
                 out[f] = int(float(m.get("value") or 0))
     return out
+
+
+_YT_ID = re.compile(r"(?:shorts/|watch\?v=|youtu\.be/|embed/)([A-Za-z0-9_-]{11})")
+
+
+def youtube_stats() -> int:
+    """Public counts of our YouTube Shorts from the YouTube Data API (needs YOUTUBE_API_KEY). Returns posts updated."""
+    if not config.YOUTUBE_API_KEY:
+        return 0
+    ids = {}
+    for p in db.q("""SELECT id, external_link FROM posts WHERE service='youtube' AND status='sent'
+                     AND external_link IS NOT NULL AND sent_at > now() - interval '30 days'"""):
+        m = _YT_ID.search(p["external_link"])
+        if m:
+            ids.setdefault(m.group(1), []).append(p["id"])
+    done, now = 0, datetime.now(timezone.utc)
+    vids = list(ids)
+    for i in range(0, len(vids), 50):
+        url = "https://www.googleapis.com/youtube/v3/videos?" + urllib.parse.urlencode(
+            {"part": "statistics", "id": ",".join(vids[i:i + 50]), "key": config.YOUTUBE_API_KEY})
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                items = json.load(r).get("items") or []
+        except Exception as e:  # noqa: BLE001  (a bad key must not stop the monitor)
+            db.log("monitor", f"YouTube stats failed: {str(e)[:200]}", "warn")
+            return done
+        for it in items:
+            st = it.get("statistics") or {}
+            views, likes, comments = (int(st[k]) if st.get(k) is not None else None
+                                      for k in ("viewCount", "likeCount", "commentCount"))
+            for pid in ids.get(it["id"], []):
+                db.q("""UPDATE posts SET views=COALESCE(%s, views), likes=COALESCE(%s, likes),
+                        comments=COALESCE(%s, comments), metrics_at=%s WHERE id=%s""", (views, likes, comments, now, pid))
+                db.q("INSERT INTO metrics(post_id, views, likes, comments) VALUES (%s,%s,%s,%s)", (pid, views, likes, comments))
+                done += 1
+    return done
 
 
 def _apply(p: dict, st: dict) -> bool:
@@ -68,9 +109,9 @@ def run():
         try:
             nodes = buffer.recent_posts(chans, ["sent", "error"], metrics=want_stats)
         except buffer.BufferError as e:
-            if want_stats and "insights" in str(e).lower():
+            if want_stats and any(w in str(e).lower() for w in ("insight", "scope", "forbidden", "metrics")):
                 db.set_setting("stats_scope_missing", True)
-                db.log("monitor", "Buffer key lacks insights:read, so views are not tracked. Make a key with it.", "warn")
+                db.log("monitor", "Buffer key lacks insightsRead, so Buffer views are not tracked. Make a key with that permission ticked.", "warn")
                 nodes = buffer.recent_posts(chans, ["sent", "error"])
                 want_stats = False
             else:
@@ -101,7 +142,15 @@ def run():
                 db.q("INSERT INTO metrics(post_id, views, likes, comments, shares, saves) VALUES (%s,%s,%s,%s,%s,%s)",
                      (p["id"], vals.get("views"), vals.get("likes"), vals.get("comments"), vals.get("shares"), vals.get("saves")))
         if stats_due:
+            got = sum(1 for n in nodes if _pick(n.get("metrics"))) if want_stats else 0
+            db.log("monitor", f"stats sync: Buffer returned stats for {got} post(s)"
+                   + ("" if want_stats else " (off: the key lacks insightsRead)"))
             db.set_setting("stats_at", time.time())
+
+    # YouTube's own API costs no Buffer requests, so its counts refresh hourly
+    if config.YOUTUBE_API_KEY and time.time() - float(s.get("yt_stats_at") or 0) > YT_EVERY:
+        db.set_setting("yt_stats_at", time.time())
+        youtube_stats()
 
     notify.live_posts()
     notify.failed_posts()

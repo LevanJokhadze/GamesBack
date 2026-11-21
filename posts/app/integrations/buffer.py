@@ -126,7 +126,7 @@ def create_video_post(channel: dict, video_url: str, title: str, caption: str, d
 
 def recent_posts(channel_ids: list[str], statuses: list[str], metrics: bool = False) -> list[dict]:
     """Up to 50 most recent posts of these channels in these states: one request instead of one per post.
-    metrics=True also returns each post's stats (needs the insights:read scope)."""
+    metrics=True also returns each post's stats (needs the insightsRead permission)."""
     ids = ", ".join(json.dumps(c) for c in channel_ids if re.fullmatch(r"[A-Za-z0-9]+", c))
     sts = ", ".join(x for x in statuses if re.fullmatch(r"[a-z_]+", x))
     q = (f'query {{ posts(first: 50, input: {{organizationId: {json.dumps(org_id())}, '
@@ -147,7 +147,7 @@ def post_status(post_id: str) -> dict:
 
 
 def post_metrics(post_id: str) -> list[dict]:
-    """Needs the insights:read scope on the key."""
+    """Needs the insightsRead permission on the key."""
     r = gql("query($id: PostId!){ post(input:{id:$id}){ metrics { type name value unit } metricsUpdatedAt } }", {"id": post_id})
     if r.get("errors"):
         raise BufferError(json.dumps(r["errors"])[:500])
