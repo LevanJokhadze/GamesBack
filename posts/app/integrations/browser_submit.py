@@ -38,10 +38,13 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 
 
 class BrowserError(RuntimeError):
-    def __init__(self, message: str, screenshot: str | None = None, signed_out: bool = False):
+    def __init__(self, message: str, screenshot: str | None = None, signed_out: bool = False,
+                 maybe_submitted: bool = False):
         super().__init__(message)
         self.screenshot = screenshot
         self.signed_out = signed_out
+        # the final Submit was pressed but no clear answer came back: retrying could submit the link twice
+        self.maybe_submitted = maybe_submitted
 
 
 def available() -> bool:
@@ -203,14 +206,22 @@ def run(campaign_url: str, link: str | None, platform: str | None = None, dry_ru
             for _ in range(40):
                 page.wait_for_timeout(500)
                 now = _text(page)
-                new = now.replace(before, "") if before and before in now else now
+                # only lines that appeared after pressing Submit (page labels like "Submitted" tabs don't count)
+                seen = set(before.splitlines())
+                new = "\n".join(ln for ln in now.splitlines() if ln not in seen)
                 if err_rx.search(new) and not ok_rx.search(new):
                     m = err_rx.search(new)
                     line = next((ln for ln in new.splitlines() if m.group(0) in ln), m.group(0))
-                    raise BrowserError(f"Content Rewards refused it: {line.strip()[:200]}", _shot(page, "refused"))
-                if ok_rx.search(new) or not _visible(page.locator(sel["link_input"])):
+                    raise BrowserError(f"Content Rewards refused it: {line.strip()[:200]}", _shot(page, "refused"),
+                                       maybe_submitted=True)
+                # only a confirmation message counts: a closed form alone can mean a further step is waiting
+                if ok_rx.search(new):
+                    shot = _shot(page, "submitted")
                     vault.put(SESSION_KEY, ctx.storage_state())
-                    return {"url": page.url, "confirmed": bool(ok_rx.search(new))}
-            raise BrowserError("Pressed Submit but saw no confirmation within 20 s", _shot(page, "no-confirmation"))
+                    return {"url": page.url, "confirmed": True, "screenshot": shot}
+            closed = not _visible(page.locator(sel["link_input"]))
+            raise BrowserError("Pressed Submit, the form " + ("closed" if closed else "stayed open")
+                               + " and no confirmation appeared: check the campaign page to see if it went in",
+                               _shot(page, "no-confirmation"), maybe_submitted=True)
         finally:
             b.close()
