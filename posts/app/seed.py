@@ -195,3 +195,56 @@ def diego_campaign():
     db.set_setting(DIEGO_KEY, True)
     db.log("seed", "DiegoLoveless GTA 6 is now the active campaign ($1/1K, min 2,000 views); Bobby VanRiper turned off "
                    "(3-pending-clip limit reached on Content Rewards)")
+
+
+# --- 21 Nov 2026: Diego's budget is nearly spent ($820 of $1,400); Boeshi (ClipLaunch, $48 of $1,750 used) runs
+# alongside it. His brief requires his Twitch overlay for the whole clip and twitch.tv/darealboeshi in every caption ---
+BOESHI_KEY = "campaign_boeshi_2026_11_21"
+BOESHI_URL = "https://contentrewards.com/c/campaigns/5c01ecdb-a148-4489-ba26-5aadbbb5bf69"
+BOESHI_OVERLAY_SRC = "https://drive.google.com/uc?export=download&id=1WRa2iLdB9JofEZiK0ckR5UKaJSe1x7nn"
+BOESHI_CAPTION = "{hook} Catch Boeshi LIVE at twitch.tv/darealboeshi #boeshi #gta6 #gtavi #twitchclips"
+BOESHI_BRIEF = """Content Rewards / ClipLaunch brief (Notion "Boeshi GTA 6 Clipping: Full Rules Brief", read 21 Nov 2026):
+- Recent GTA 6 Twitch VODs of twitch.tv/darealboeshi; clip farm whole VODs (every clippable moment).
+- Required: his Twitch overlay (purple "@darealboeshi" badge, Google Drive) clearly visible for the whole clip.
+- Caption: twitch.tv/darealboeshi in every caption (e.g. "Catch Boeshi LIVE at twitch.tv/darealboeshi").
+- 40%+ Tier 1 audience (US, UK, CA, AU); at least 0.8% engagement; each clip stays live 30 days; no bio requirement.
+- Favoured: jokes about his voice, his mewing when focused or scared, chad edits, meme captions.
+- New accounts: warm-up guide; read the approval process and USA-audience guide in the brief.
+- $1 per 1K views, min payout $3 (3,000 views), max $300 per clip. Budget $1,750 ($48 used on 21 Nov)."""
+
+
+def boeshi_campaign():
+    """Once the overlay is in Blob: Boeshi's campaign is turned on next to Diego's, with his overlay under the stream
+    frame (whole-frame layout puts the frame at y 576-1184 and word captions near 1460). Retried on the next start
+    if the overlay can't be fetched; the campaign stays off until then, since the overlay is required."""
+    import tempfile
+    import urllib.request
+    from pathlib import Path
+    from .integrations import blob
+    if db.settings().get(BOESHI_KEY):
+        return
+    try:
+        tmp = Path(tempfile.mkdtemp()) / "boeshi.png"
+        req = urllib.request.Request(BOESHI_OVERLAY_SRC, headers={"user-agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            tmp.write_bytes(r.read())
+        if tmp.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
+            raise RuntimeError("Google Drive did not return a PNG")
+        overlay = blob.upload(tmp, "overlays/boeshi.png", "image/png")
+    except Exception as e:
+        db.log("seed", f"Boeshi overlay could not be fetched, campaign stays off, will retry on next start: {e}", "warn")
+        return
+    if not db.one("SELECT 1 AS x FROM campaigns WHERE url=%s", (BOESHI_URL,)):
+        db.q("""INSERT INTO campaigns(name, url, cpm, min_payout, max_payout, channels, streamer_name, game, active)
+                VALUES ('Boeshi GTA 6 Clipping', %s, 1, 3, 300, %s, 'Boeshi', 'Grand Theft Auto VI', FALSE)""",
+             (BOESHI_URL, ["darealboeshi"]))
+    db.q("""UPDATE campaigns SET active=TRUE, ended_at=NULL, caption_template=%s, rules=%s, overlay_url=%s,
+              overlay_width=540, overlay_y=1200, captions='word', cam_box=NULL, layout='blur', daily_quota=2,
+              min_clip_views=10, lookback_hours=72, submit_window_minutes=30
+            WHERE url=%s""", (BOESHI_CAPTION, BOESHI_BRIEF, overlay, BOESHI_URL))
+    db.q("""UPDATE accounts SET streamers = array_append(streamers, 'darealboeshi')
+            WHERE EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'diegoloveless')
+              AND NOT EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'darealboeshi')""")
+    db.set_setting(BOESHI_KEY, True)
+    db.log("seed", "Boeshi GTA 6 is now active next to DiegoLoveless ($1/1K, min 3,000 views), with his required "
+                   "Twitch overlay and twitch.tv/darealboeshi in the caption")
