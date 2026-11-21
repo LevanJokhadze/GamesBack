@@ -133,7 +133,7 @@ def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x
         v = f"[0:v]scale=-2:{H},crop={W}:{H}[v]"
     elif layout == "blur":
         v = (f"[0:v]split[a][b];[a]scale=-2:{H},crop={W}:{H},boxblur=24:2,eq=brightness=-0.08[bg];"
-             f"[b]scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-80[v]")
+             f"[b]scale={W}:-2:flags=lanczos[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2-80[v]")
     elif layout == 'react':
         sw, sh = src
         if face_expr:  # tracked face crop (no cam frame)

@@ -175,7 +175,9 @@ LINE_H = 96
 def hook_y(lines: int, layout: str, overlay: tuple[int, int] | None) -> int:
     """Centre y of the hook: on the webcam/gameplay seam (react) or upper third, moved off the overlay."""
     band = lines * LINE_H + 40
-    y = SEAM if layout == "react" else 560
+    # react: on the webcam/gameplay seam; blur: in the blurred band just above the full stream frame
+    # (cut.py puts the 1080x608 frame at y 576-1184); other layouts: upper third
+    y = SEAM if layout == "react" else (556 - band / 2) if layout == "blur" else 560
     if overlay:
         oy, oh = overlay
         lo, hi = y - band / 2, y + band / 2

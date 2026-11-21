@@ -1,4 +1,5 @@
 """posts.lane.ge API: clips, approvals, posts, analytics, campaigns, settings and worker control."""
+import threading
 import time
 from collections import defaultdict
 
@@ -7,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from . import accounts, assistant, assistant_live, auth, calendar, captions, config, db, manage, seed, submit_api
-from .workers import runner
+from .workers import render, runner
 
 app = FastAPI(title="posts.lane.ge API")
 app.add_middleware(CORSMiddleware, allow_origins=config.ALLOWED_ORIGINS, allow_methods=["*"], allow_headers=["*"])
@@ -135,6 +136,29 @@ def approve(clip_id: int):
     return {"ok": True}
 
 
+@app.post("/api/clips/{clip_id}/rerender", dependencies=[A])
+def rerender_clip(clip_id: int):
+    """Render the clip again with the current editing and swap its video in place (about 2-4 minutes)."""
+    if not db.one("SELECT 1 AS x FROM clips WHERE id=%s", (clip_id,)):
+        raise HTTPException(404, "no such clip")
+    if clip_id in render.rerendering():
+        raise HTTPException(409, "this clip is already being re-rendered")
+    threading.Thread(target=lambda: _quiet(render.rerender, clip_id), daemon=True).start()
+    return {"ok": True, "started": True}
+
+
+@app.get("/api/clips/rerendering", dependencies=[A])
+def rerendering():
+    return {"ids": render.rerendering()}
+
+
+def _quiet(fn, *a):
+    try:
+        fn(*a)
+    except Exception:
+        pass  # already logged to the event log
+
+
 @app.post("/api/clips/{clip_id}/reject", dependencies=[A])
 def reject(clip_id: int):
     db.q("UPDATE clips SET status='rejected' WHERE id=%s AND status IN ('review','approved')", (clip_id,))
@@ -198,7 +222,7 @@ def retry_moment(moment_id: int):
 CAMPAIGN_FIELDS = ["name", "url", "cpm", "min_payout", "max_payout", "channels", "game", "caption_template", "overlay_url",
                    "overlay_width", "overlay_y", "captions", "cam_box", "title_secs", "daily_quota", "min_clip_views",
                    "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes",
-                   "streamer_name", "ended_at", "end_reason", "target_secs", "teaser", "punch_zoom"]
+                   "streamer_name", "ended_at", "end_reason", "target_secs", "teaser", "punch_zoom", "layout"]
 
 
 @app.get("/api/campaigns", dependencies=[A])

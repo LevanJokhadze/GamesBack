@@ -191,6 +191,9 @@ CREATE INDEX IF NOT EXISTS posts_submit ON posts(submit_status) WHERE submit_sta
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS target_secs REAL DEFAULT 18;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS teaser BOOLEAN DEFAULT TRUE;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS punch_zoom BOOLEAN DEFAULT TRUE;
+-- 'react' (webcam panel on top, gameplay cropped below) or 'blur' (the whole stream frame, unzoomed, on a blurred
+-- background: sharper, since Twitch clips are too soft to zoom into)
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS layout TEXT DEFAULT 'react';
 -- the on-screen hook burned into the clip, and how it was cut (start/end, payoff, teaser, zooms, candidates)
 ALTER TABLE clips ADD COLUMN IF NOT EXISTS hook_text TEXT;
 ALTER TABLE clips ADD COLUMN IF NOT EXISTS edit_plan JSONB;
