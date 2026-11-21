@@ -33,3 +33,20 @@ def test_geo_routing():
     assert publish.geo_ok(None, None, targeted)
     assert not publish.geo_ok(None, "RU", targeted)      # US campaigns stay off the Russian accounts
     assert publish.geo_ok("", "US", targeted)
+
+
+def test_geo_slots_use_the_geo_timezone():
+    from datetime import datetime, timezone
+    from app import db
+    from app.workers import manual
+    s = dict(db.DEFAULT_SETTINGS)
+    tz, slots = publish.slot_plan(s, "ru")
+    assert tz.key == "Europe/Moscow" and slots == ["15:00", "20:00"]
+    assert publish.slot_plan(s, "US")[0] is publish.ET and publish.slot_plan(s, None)[1] == ["12:00", "15:00"]
+    assert publish.slot_plan({"geo_slots": {"RU": {"tz": "Nope/Zone", "slots": ["10:00"]}}}, "RU")[0] is publish.ET
+    assert publish.zone_label(tz) == "Moscow" and publish.zone_label(publish.ET) == "US Eastern"
+    now = datetime(2026, 11, 22, 9, 0, tzinfo=timezone.utc)
+    ru = [t for t in manual.slot_times(s, now, "RU") if t.date() == now.date()]
+    assert [t.strftime("%H:%M") for t in ru] == ["12:00", "17:00"]            # 15:00 and 20:00 Moscow, in UTC
+    us = [t for t in manual.slot_times(s, now) if t.date() == now.date()]
+    assert [t.strftime("%H:%M") for t in us] == ["17:00", "20:00"]            # 12:00 and 15:00 US Eastern, in UTC

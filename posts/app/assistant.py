@@ -194,7 +194,7 @@ def snapshot() -> dict:
         "clips_ready": ready,
         "pipeline": {
             "workers_paused": bool(s.get("workers_paused")), "auto_submit": bool(s.get("auto_submit")),
-            "services": s.get("services"), "slots_et": s.get("slots_et"),
+            "services": s.get("services"), "slots_et": s.get("slots_et"), "geo_slots": s.get("geo_slots"),
             "buffer_paused_until": datetime.fromtimestamp(buffer_paused, timezone.utc) if buffer_paused > time.time() else None,
             "views_tracked": not s.get("stats_scope_missing"),
             "workers": [b for b in beats if b["last_error_at"] and (not b["last_ok"] or b["last_error_at"] > b["last_ok"])],
@@ -240,7 +240,7 @@ def attention(snap: dict | None = None) -> list[dict]:
                 acts.append({"label": "Add link", "modal": {"kind": "upload", "id": e["upload_id"]}})
             cards.append(_card(f"upload-{e.get('upload_id') or e['account_id']}-{e['time']}", "urgent",
                                f"Upload {due} on {e['platform']} @{e['handle']}",
-                               (e.get("title") or "The next clip") + f" ({e['time']} Tbilisi, {e['time_et']} ET).", acts,
+                               (e.get("title") or "The next clip") + f" ({e['time']} Tbilisi, {e.get('slot_time') or e['time_et']} {e.get('slot_zone') or 'ET'}).", acts,
                                {"type": "account", "id": e["account_id"]}))
     real = [z for z in snap["zero_view_videos"] if z["kind"] == "real"]
     for z in real[:3]:

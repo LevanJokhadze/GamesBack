@@ -110,9 +110,12 @@ def _download(url: str) -> str:
     return url + ("&" if "?" in url else "?") + "download=1"
 
 
-def _when(t) -> str:
+def _when(t, tz: str | None = None) -> str:
+    """Tbilisi time plus the audience's own time (the account's geo timezone, default US Eastern)."""
+    tz = tz or "America/New_York"
+    label = "US Eastern" if tz == "America/New_York" else tz.split("/")[-1].replace("_", " ")
     return (f"{t.astimezone(ZoneInfo(TBILISI)):%a %d %b, %H:%M} Tbilisi "
-            f"({t.astimezone(ZoneInfo('America/New_York')):%H:%M} US Eastern)")
+            f"({t.astimezone(ZoneInfo(tz)):%H:%M} {label})")
 
 
 def manual_day(account: dict) -> int:
@@ -120,7 +123,7 @@ def manual_day(account: dict) -> int:
     return max(1, (datetime.now(timezone.utc) - since).days + 1) if since else 1
 
 
-def manual_upload(account: dict, clip: dict, slot) -> None:
+def manual_upload(account: dict, clip: dict, slot, tz: str | None = None) -> None:
     """'Time to upload' email for a manual account: download link, caption, platform and username."""
     pf = LABEL.get(account["platform"], account["platform"])
     handle = "@" + account["handle"]
@@ -131,7 +134,7 @@ def manual_upload(account: dict, clip: dict, slot) -> None:
     dash = f"{config.DASHBOARD_URL}/#accounts"
     lines = [f"It's time to upload a video on {pf}.", "",
              f"Platform: {pf}", f"Account: {handle}" + (f" ({account['profile_url']})" if account.get("profile_url") else ""),
-             f"Post at: {_when(slot)}", "",
+             f"Post at: {_when(slot, tz)}", "",
              f"Download the video: {dl}", ""]
     if account["platform"] in ("youtube", "tiktok") and title:
         lines += ["Title:", title, ""]
@@ -148,7 +151,7 @@ def manual_upload(account: dict, clip: dict, slot) -> None:
             f'<tr><td style="color:#666">Platform</td><td><b>{e(pf)}</b></td></tr>'
             f'<tr><td style="color:#666">Account</td><td><b>{e(handle)}</b>'
             + (f' (<a href="{e(account["profile_url"])}">profile</a>)' if account.get("profile_url") else "") + '</td></tr>'
-            f'<tr><td style="color:#666">Post at</td><td>{e(_when(slot))}</td></tr></table>'
+            f'<tr><td style="color:#666">Post at</td><td>{e(_when(slot, tz))}</td></tr></table>'
             + (f'<p><img src="{e(clip["thumb_url"])}" width="160" style="border-radius:8px"></p>' if clip.get("thumb_url") else "")
             + f'<p><a href="{e(dl)}" style="display:inline-block;background:#111;color:#fff;padding:10px 16px;border-radius:8px;'
               f'text-decoration:none">Download the video</a></p>'

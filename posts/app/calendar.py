@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from . import db, notify
 from .workers import manual
-from .workers.publish import ET, day_cap, min_gap
+from .workers.publish import ET, day_cap, min_gap, slot_plan, zone_label
 
 router = APIRouter()
 
@@ -24,10 +24,12 @@ def _dl(url: str | None) -> str | None:
     return notify._download(url) if url else None
 
 
-def _local(t: datetime) -> dict:
+def _local(t: datetime, tz: ZoneInfo = ET) -> dict:
+    """Tbilisi day and time, plus the time where the account's audience is (slot_time in slot_zone)."""
     lt = t.astimezone(TBILISI)
     return {"at": t.isoformat(), "day": lt.date().isoformat(), "time": lt.strftime("%H:%M"),
-            "time_et": t.astimezone(ET).strftime("%H:%M")}
+            "time_et": t.astimezone(ET).strftime("%H:%M"),
+            "slot_time": t.astimezone(tz).strftime("%H:%M"), "slot_zone": zone_label(tz)}
 
 
 def _clip(c: dict | None) -> dict:
@@ -37,13 +39,14 @@ def _clip(c: dict | None) -> dict:
             "video_url": c.get("video_url"), "download_url": _dl(c.get("video_url"))}
 
 
-def _slots(s: dict, lo: datetime, hi: datetime) -> list[datetime]:
+def _slots(s: dict, lo: datetime, hi: datetime, geo: str | None = None) -> list[datetime]:
+    tz, slots = slot_plan(s, geo)
     out = []
-    d = lo.astimezone(ET).date() - timedelta(days=1)
-    while d <= hi.astimezone(ET).date() + timedelta(days=1):
-        for hhmm in sorted(s.get("slots_et") or ["19:00"]):
+    d = lo.astimezone(tz).date() - timedelta(days=1)
+    while d <= hi.astimezone(tz).date() + timedelta(days=1):
+        for hhmm in slots:
             h, mi = map(int, hhmm.split(":"))
-            t = datetime(d.year, d.month, d.day, h, mi, tzinfo=ET).astimezone(timezone.utc)
+            t = datetime(d.year, d.month, d.day, h, mi, tzinfo=tz).astimezone(timezone.utc)
             if lo <= t < hi:
                 out.append(t)
         d += timedelta(days=1)
@@ -64,12 +67,14 @@ def build(start: date, days: int, now: datetime | None = None) -> dict:
     events: list[dict] = []
 
     # reminders already emailed (or sent with "upload now")
-    for r in db.q("""SELECT mu.*, a.platform, a.handle, a.profile_url, c.title, c.caption, c.thumb_url, c.video_url
+    for r in db.q("""SELECT mu.*, a.platform, a.handle, a.profile_url, g.code AS geo_code, c.title, c.caption,
+                            c.thumb_url, c.video_url
                      FROM manual_uploads mu JOIN accounts a ON a.id = mu.account_id JOIN clips c ON c.id = mu.clip_id
+                     LEFT JOIN geos g ON g.id = a.geo_id
                      WHERE mu.slot_at >= %s AND mu.slot_at < %s ORDER BY mu.slot_at""", (lo, hi)):
         status = "posted" if r["link"] else "done" if r["done_at"] else "to_upload"
         events.append({"kind": "manual", "status": status, "upload_id": r["id"], "link": r["link"],
-                       **_local(r["slot_at"]), **_account({**r, "id": r["account_id"]}),
+                       **_local(r["slot_at"], slot_plan(s, r["geo_code"])[0]), **_account({**r, "id": r["account_id"]}),
                        **_clip({**r, "id": r["clip_id"]})})
 
     # forecast: the coming slots of every live manual account, with the clip it would most likely get
@@ -83,7 +88,9 @@ def build(start: date, days: int, now: datetime | None = None) -> dict:
             per_day[k] = per_day.get(k, 0) + 1
         planned: list[int] = []
         cap = day_cap(a["platform"], s)
-        for t in _slots(s, max(lo, now - manual.WINDOW), hi):
+        geo = manual.geo_of(a)
+        tz = slot_plan(s, geo)[0]
+        for t in _slots(s, max(lo, now - manual.WINDOW), hi, geo):
             if t in taken or t + manual.WINDOW < now:
                 continue
             k = t.astimezone(btz).date()
@@ -94,7 +101,7 @@ def build(start: date, days: int, now: datetime | None = None) -> dict:
             if clip:
                 planned.append(clip["id"])
             events.append({"kind": "manual", "status": "planned", "upload_id": None, "link": None,
-                           **_local(t), **_account(a), **_clip(clip)})
+                           **_local(t, tz), **_account(a), **_clip(clip)})
 
     # automatic posts through Buffer (uploads recorded by hand are already listed above)
     for p in db.q("""SELECT p.*, c.title, c.caption, c.thumb_url, c.video_url FROM posts p JOIN clips c ON c.id = p.clip_id
@@ -109,8 +116,17 @@ def build(start: date, days: int, now: datetime | None = None) -> dict:
     today = now.astimezone(TBILISI).date()
     slot_local = sorted({_local(t)["time"] for t in _slots(s, datetime.combine(today, datetime.min.time(), TBILISI),
                                                             datetime.combine(today, datetime.min.time(), TBILISI) + timedelta(days=1))})
+    day0 = datetime.combine(today, datetime.min.time(), TBILISI)
+    # other geos' own slots, in Tbilisi time, e.g. {"RU": {"zone": "Moscow", "slots": ["15:00","20:00"], "local": [...]}}
+    geo_plan = {}
+    for code in sorted(s.get("geo_slots") or {}):
+        gtz, gslots = slot_plan(s, code)
+        if gtz is ET and gslots == sorted(s.get("slots_et") or ["19:00"]):
+            continue
+        geo_plan[code] = {"zone": zone_label(gtz), "slots": gslots,
+                          "local": sorted({_local(t)["time"] for t in _slots(s, day0, day0 + timedelta(days=1), code)})}
     # the posting plan the workers follow, for the page's summary line
-    plan = {"slots_local": slot_local, "per_day": {pf: min(day_cap(pf, s), len(s.get("slots_et") or ["19:00"]))
+    plan = {"slots_local": slot_local, "geo_slots": geo_plan, "per_day": {pf: min(day_cap(pf, s), len(s.get("slots_et") or ["19:00"]))
                                                    for pf in ("tiktok", "instagram", "youtube")},
             "min_gap_minutes": min_gap(s) // 60, "stagger_minutes": int(s.get("stagger_minutes") or 15)}
     return {"timezone": "Asia/Tbilisi", "today": today.isoformat(), "plan": plan, "start": start.isoformat(), "days": days,
