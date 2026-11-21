@@ -54,6 +54,29 @@ Frontend: [LevanJokhadze/Games](https://github.com/LevanJokhadze/Games).
 
 House rules vary a lot between families and apps; these are easy to change in `src/engine/game.ts`.
 
+## Bura (5 cards, in pairs)
+
+Rooms can play **Bura** instead of Joker (`config.game = "bura"`, or create the room with
+`POST /api/rooms {"game":"bura"}`). Bura is always 2 against 2: seats 0 & 2 against 1 & 3.
+Engine: `src/bura/engine.ts`, bot: `src/bura/bot.ts`.
+
+| Topic | Rule |
+| --- | --- |
+| Deck | 36 cards, 6–A. Order A > 10 > K > Q > J > 9 > 8 > 7 > 6. Points A 11, 10 10, K 4, Q 3, J 2 (120 in all). |
+| Deal | First round: a random card picks the dealing team (red = seats 0 & 2, black = 1 & 3). Later: a player of the team that won the last round deals (partners take turns); after a tie the deal moves left. 5 cards each; the next card is trump and lies under the stock, drawn last. |
+| Lead | The player after the dealer leads first, then the trick winner. Lead 1–5 cards of one suit. |
+| Answer | Everyone plays the same number of cards. A set takes the trick over only if it beats the **current winning set** one-for-one (higher card of the same suit, or a trump against a non-trump); the highest beater wins. Cards that don't beat go face down. |
+| Refill | From the trick winner clockwise, one card at a time, up to 5 while the stock lasts. |
+| Malyutka | All 5 cards of one non-trump suit may be played when answering any lead. It becomes the winning set; everyone who already played adds cards up to 5. |
+| Bura | 5 trumps, shown on your turn: your team wins the round at its value. |
+| Raises | Before leading: davi ×2, se ×3, chari ×4, panji ×5, shashi ×6. The partner must approve; then the other team answers (accept, raise again, give up). Raising again or giving up also needs both answering partners; if they disagree, it counts as accepted. Teams alternate. Giving up scores the value before the raise. No raises in the round after a team first reaches 10. |
+| Round | Counted by the server after the last trick: 61+ wins the round's value, 60–60 is a tie. No penalties. |
+| Match | First team to 11. Rated as one team game (same Elo as Joker pairs), stored with mode `bura`; the match summary holds every round. |
+
+WebSocket move: `bura {action}` where `action` is one of `lead {cards}`, `answer {cards}`,
+`topUp {cards}`, `bura`, `raise`, `approve {yes}`, `respond {answer: "accept"|"raise"|"fold"}`.
+The view (`game.kind = "bura"`) hides other hands and face-down cards.
+
 ## Rating (Elo)
 
 Exactly the chess (FIDE) formula: expected score `E = 1 / (1 + 10^((Rb − Ra)/400))`, change
@@ -107,7 +130,7 @@ npm run simulate   # play 200 bot-only games and print bot accuracy
 | Method | Path | Description |
 | --- | --- | --- |
 | GET | `/api/health` | Health check |
-| POST | `/api/rooms` | Create a room → `{ "code": "ABCDE" }` |
+| POST | `/api/rooms` | Create a room (`{"game":"bura"}` for Bura, default Joker) → `{ "code": "ABCDE" }` |
 | GET | `/api/rooms/:code` | Room info (404 if it doesn't exist) |
 | GET (WebSocket) | `/api/rooms/:code/ws` | Join a room |
 | POST | `/api/register` | `{nickname, firstName, lastName, avatar, password}` (avatar = JPEG/PNG/WebP data URL ≤ 300 KB) → `{token, user}` |
@@ -127,7 +150,7 @@ npm run simulate   # play 200 bot-only games and print bot accuracy
 | GET | `/api/ice` | `{iceServers}`: voice relay (TURN) servers for the browser, empty when none is set |
 
 WebSocket messages from the client (JSON): `hello {token}` (send first; without accounts
-`hello {playerId, name}`), `start`, `config {config: {mode, khishti, pairs}}`, `seat {seat}`, `addBot {seat}`, `removeSeat {seat}`,
+`hello {playerId, name}`), `start`, `config {config: {game, mode, khishti, pairs}}`, `seat {seat}`, `addBot {seat}`, `removeSeat {seat}`,
 `trump {suit|null}`, `bid {bid}`, `play {cardId, joker?: {type: "high"|"low", suit?}}`,
 `chat {text}`, `rematch`, `back` (end a bot takeover), `ping`.
 Voice: `voice {on}` (joined/left voice), `talk {on}` (push-to-talk, broadcast as `talk {peer, on}`),
