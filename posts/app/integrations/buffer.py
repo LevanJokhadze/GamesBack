@@ -152,3 +152,30 @@ def post_metrics(post_id: str) -> list[dict]:
     if r.get("errors"):
         raise BufferError(json.dumps(r["errors"])[:500])
     return r["data"]["post"].get("metrics") or []
+
+
+def delete_post(post_id: str) -> None:
+    """Removes the post from Buffer (a queued post then never goes out). Buffer can't take a published post off the
+    social network itself: that has to be deleted on the app."""
+    r = gql("mutation($id: PostId!){ deletePost(input:{id:$id}){ __typename ... on DeletePostSuccess { id } } }",
+            {"id": post_id}, essential=True)
+    res = (r.get("data") or {}).get("deletePost") or {}
+    if r.get("errors") or res.get("__typename") != "DeletePostSuccess":
+        msg = json.dumps(r.get("errors") or res)[:400]
+        if "not found" in msg.lower() or "NotFound" in msg:
+            return  # already gone from Buffer
+        raise BufferError(msg)
+
+
+EDIT = """mutation($input: EditPostInput!) { editPost(input: $input) {
+  ... on PostActionSuccess { post { id dueAt status } }
+  ... on MutationError { message } } }"""
+
+
+def reschedule_post(post_id: str, due_iso: str) -> dict:
+    r = gql(EDIT, {"input": {"id": post_id, "dueAt": due_iso, "mode": "customScheduled", "schedulingType": "automatic"}},
+            essential=True)
+    res = (r.get("data") or {}).get("editPost") or {}
+    if r.get("errors") or "post" not in res:
+        raise BufferError(res.get("message") or json.dumps(r.get("errors"))[:500])
+    return res["post"]
