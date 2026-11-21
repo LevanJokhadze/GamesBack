@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 
 from . import db, notify
 from .workers import manual
-from .workers.publish import ET, day_cap
+from .workers.publish import ET, day_cap, min_gap
 
 router = APIRouter()
 
@@ -109,7 +109,11 @@ def build(start: date, days: int, now: datetime | None = None) -> dict:
     today = now.astimezone(TBILISI).date()
     slot_local = sorted({_local(t)["time"] for t in _slots(s, datetime.combine(today, datetime.min.time(), TBILISI),
                                                             datetime.combine(today, datetime.min.time(), TBILISI) + timedelta(days=1))})
-    return {"timezone": "Asia/Tbilisi", "today": today.isoformat(), "start": start.isoformat(), "days": days,
+    # the posting plan the workers follow, for the page's summary line
+    plan = {"slots_local": slot_local, "per_day": {pf: min(day_cap(pf, s), len(s.get("slots_et") or ["19:00"]))
+                                                   for pf in ("tiktok", "instagram", "youtube")},
+            "min_gap_minutes": min_gap(s) // 60, "stagger_minutes": int(s.get("stagger_minutes") or 15)}
+    return {"timezone": "Asia/Tbilisi", "today": today.isoformat(), "plan": plan, "start": start.isoformat(), "days": days,
             "now": now.isoformat(), "slots_et": sorted(s.get("slots_et") or []), "slots_local": slot_local,
             "email_ready": notify.enabled(), "manual_accounts": len(manual.manual_accounts()), "events": events}
 

@@ -22,7 +22,12 @@ TITLE_MODEL = env("TITLE_MODEL", "claude-haiku-5-5")
 # or saved passwords can no longer be read)
 ACCOUNTS_KEY = env("ACCOUNTS_KEY")
 
-RUN_WORKERS = env("RUN_WORKERS", "1") == "1"
+# Workers run by default only in Railway's production environment (or outside Railway): a forked or preview
+# environment has a copy of the database and the same keys, and must never post, email or submit twice.
+_RAILWAY_ENV = env("RAILWAY_ENVIRONMENT_NAME")
+RUN_WORKERS = env("RUN_WORKERS", "1" if _RAILWAY_ENV in (None, "production") else "0") == "1"
+# Optional allowlist, e.g. "render" in a test environment: only these workers start
+ONLY_WORKERS = [w.strip() for w in (env("WORKERS") or "").split(",") if w.strip()]
 WORK_DIR = Path(env("WORK_DIR", "/tmp/posts-work"))
 VENDOR = Path(__file__).resolve().parent.parent / "vendor" / "gtavi"
 
