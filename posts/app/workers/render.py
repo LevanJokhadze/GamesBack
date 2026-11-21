@@ -65,6 +65,8 @@ def run():
 
 
 SOURCE_FORMAT = "b[format_id!^=portrait][height<=1080]/b[height<=1080]/b"
+TREND_SOURCES = ("yt_short", "ig_reel")
+TREND_FORMAT = "bv*[height<=1920]+ba/b"
 
 
 class Skip(Exception):
@@ -91,8 +93,19 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     src = work / "src" / "clip.mp4"
     # the landscape 1080p rendition (Twitch also lists "portrait-*" crops, which the react layout must not get),
     # highest resolution and frame rate first
-    sh([sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1080,fps", "-f", SOURCE_FORMAT,
-        "-o", str(src), m["url"]], timeout=600)
+    trend = (m.get("source") or "") in TREND_SOURCES
+    if trend:
+        # someone else's Short or Reel (the trends worker): its best vertical video + audio
+        cmd = [sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1920,fps", "-f", TREND_FORMAT,
+               "--merge-output-format", "mp4", "-o", str(src), m["url"]]
+        if config.YTDLP_COOKIES:
+            cookies = work / "cookies.txt"
+            cookies.write_text(config.YTDLP_COOKIES)
+            cmd[3:3] = ["--cookies", str(cookies)]
+        sh(cmd, timeout=600)
+    else:
+        sh([sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1080,fps", "-f", SOURCE_FORMAT,
+            "-o", str(src), m["url"]], timeout=600)
     src_res = hook.resolution(src)
     # nudity gets a TikTok strike and a YouTube age restriction: such a moment is never cut
     safe = safety.check(src)
@@ -116,6 +129,8 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     t["safety"] = safe
     if safe["verdict"] in ("revealing", "unsure"):  # a person decides: never auto-approved
         t["needs_review"] = True
+    if trend:  # re-cut from another creator's upload: a person always looks first
+        t["needs_review"] = True
     plain = t["title"] or (m["title"] or "")
     t["hook"] = t.get("hook") or plain  # never the templated title: the caption template repeats its own wrapper
     title = apply_title_template(c, plain)
@@ -125,13 +140,17 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     use_teaser = c.get("teaser") is not False
     plan = hook.plan(dur_src, pick["t"] if pick else None, words, target=c.get("target_secs") or 18,
                      teaser=use_teaser, second=second)
+    want = "split" if trend else (c.get("layout") or "react")  # a vertical Short/Reel only fits the split layout
     cmd = [sys.executable, str(config.VENDOR / "cut.py"), str(job), "--start", f"{plan['start']:.2f}",
-           "--end", f"{plan['end']:.2f}", "--layout", c.get("layout") or "react", "--captions", c["captions"] or "word"]
-    if c["cam_box"]:
+           "--end", f"{plan['end']:.2f}", "--layout", want, "--captions", c["captions"] or "word"]
+    if c["cam_box"] and not trend:
         cmd += ["--cam", c["cam_box"]]
-    if (c.get("layout") or "react") == "split":
-        # the satisfying loop under the streamer: chosen by the moment, so a re-render keeps the same one
-        cmd += ["--bottom", str(loops.pick(c, int(m.get("id") or 0))), "--bottom-ss", f"{(int(m.get('id') or 0) * 7) % 30}"]
+    if want == "split":
+        # under the streamer: a ball race drawn for this clip (its winner crosses the line just before the end), or
+        # a satisfying loop chosen by the moment, so a re-render keeps the same one
+        mid = int(m.get("id") or 0)
+        bottom = loops.pick(c, mid, secs=plan["end"] - plan["start"], work=work)
+        cmd += ["--bottom", str(bottom), "--bottom-ss", "0" if bottom.name.startswith("race-") else f"{(mid * 7) % 30}"]
     r = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=1800)
     out = (r.stdout or "") + (r.stderr or "")
     if "skipped:" in out:
@@ -155,11 +174,13 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
         payoff = (plan["main_at"] + plan["peak"]) if plan.get("teaser") else plan.get("peak")
         at = banner.times(hook.duration(final), payoff, banner.probe(bn)["duration"])
         with_banner = work / "final_banner.mp4"
-        plan = {**plan, "banner": banner.insert(final, bn, with_banner, at, width=c.get("banner_width") or 1000,
+        plan = {**plan, "banner": banner.insert(final, bn, with_banner, at, width=c.get("banner_width") or 0,
                                                 key=c.get("banner_key") or "")}
         final = with_banner
     dur = round(hook.duration(final), 2)
     plan = {**plan, "source": f"{src_res[0]}x{src_res[1]}", "layout": layout}
+    if trend:
+        plan["from"] = {"source": m.get("source"), "url": m["url"]}
     return {"final": final, "duration": dur, "title": title, "texts": t, "plan": plan, "candidates": cands}
 
 

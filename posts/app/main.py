@@ -36,6 +36,7 @@ def startup():
     seed.retry_oom_renders()
     seed.russian_campaigns()
     seed.bigballs_campaign()
+    seed.bigballs_trends()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)
@@ -229,7 +230,8 @@ CAMPAIGN_FIELDS = ["name", "url", "cpm", "min_payout", "max_payout", "channels",
                    "overlay_width", "overlay_y", "captions", "cam_box", "title_secs", "daily_quota", "min_clip_views",
                    "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes",
                    "streamer_name", "ended_at", "end_reason", "target_secs", "teaser", "punch_zoom", "layout",
-                   "language", "geo", "title_template", "banner_url", "banner_width", "banner_key", "bottom_urls"]
+                   "language", "geo", "title_template", "banner_url", "banner_width", "banner_key", "bottom_urls",
+                   "bottom_kind", "trend_tags", "trend_min_views"]
 
 
 @app.get("/api/campaigns", dependencies=[A])
@@ -253,6 +255,14 @@ def update_campaign(cid: int, body: dict):
     if data:
         db.q(f"UPDATE campaigns SET {', '.join(f'{k}=%s' for k in data)} WHERE id=%s", list(data.values()) + [cid])
     return {"ok": True}
+
+
+@app.get("/api/campaigns/{cid}/trends", dependencies=[A])
+def campaign_trends(cid: int):
+    """The Shorts/Reels the trends worker checked for this campaign, newest first, with its verdict."""
+    return db.q("""SELECT t.*, m.status AS moment_status, (SELECT id FROM clips WHERE moment_id=t.moment_id LIMIT 1) AS clip_id
+                   FROM trend_videos t LEFT JOIN moments m ON m.id = t.moment_id
+                   WHERE t.campaign_id=%s ORDER BY t.checked_at DESC LIMIT 60""", (cid,))
 
 
 VIDEO_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm"}

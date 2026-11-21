@@ -5,13 +5,15 @@ import traceback
 
 from .. import db
 from ..integrations.buffer import RateLimited
-from . import discover, manual, monitor, publish, render, submit
+from . import discover, manual, monitor, publish, render, submit, trends
 
 _last_limit_log: dict[str, float] = {}
 
 WORKERS = {
     # name: (function, seconds between runs)
     "discover": (discover.run, 20 * 60),
+    # each campaign's trend_tags are searched every 4 h (trends.TREND_EVERY); the loop only checks who is due
+    "trends": (trends.run, 15 * 60),
     "render": (render.run, 3 * 60),
     "publish": (publish.run, 5 * 60),
     "monitor": (monitor.run, 10 * 60),
