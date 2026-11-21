@@ -119,6 +119,7 @@ npm run simulate   # play 200 bot-only games and print bot accuracy
 | GET | `/api/users/:id/games?limit=20&before=<ISO time>` | Match history, newest first, paged |
 | GET | `/api/users/:id/avatar` | Profile photo |
 | GET | `/api/games/:id` | Match summary: players, places, rating changes, every deal |
+| GET | `/api/ice` | `{iceServers}`: voice relay (TURN) servers for the browser, empty when none is set |
 
 WebSocket messages from the client (JSON): `hello {token}` (send first; without accounts
 `hello {playerId, name}`), `start`, `config {config: {game, mode, khishti, pairs}}`, `seat {seat}`, `addBot {seat}`, `removeSeat {seat}`,
@@ -139,6 +140,10 @@ The service runs `npm start` (Railpack detects it). Settings:
 - Generate a domain (Settings → Networking) or attach your subdomain, and use that URL as the
   frontend's `VITE_API_URL`.
 - Keep one replica: rooms are in memory, so several replicas would not share games.
+- Voice relay (optional, for players on mobile data or strict Wi-Fi): set `CF_TURN_KEY_ID` and
+  `CF_TURN_API_TOKEN` from a Cloudflare Realtime TURN key (short-lived credentials are fetched and
+  cached), or `TURN_URLS` (comma-separated), `TURN_USERNAME` and `TURN_CREDENTIAL` for any other
+  TURN server. Without them voice connects directly, which some networks block.
 
 ## Deploy to Cloudflare
 
