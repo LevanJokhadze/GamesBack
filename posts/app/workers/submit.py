@@ -70,8 +70,8 @@ def attempt(post: dict, s: dict) -> bool:
                 _done(post, "api", r.get("id"))
                 return True
             if m == "browser":
-                browser_submit.run(post.get("submit_url") or post["campaign_url"], post["external_link"], post["service"])
-                _done(post, "browser", None)
+                r = browser_submit.run(post.get("submit_url") or post["campaign_url"], post["external_link"], post["service"])
+                _done(post, "browser", r.get("screenshot"))  # the confirmation screenshot, as proof
                 return True
             if m == "agent":
                 db.q("""UPDATE posts SET submit_status='agent', submit_method='agent', submit_next_at=NULL, updated_at=now()
@@ -83,6 +83,10 @@ def attempt(post: dict, s: dict) -> bool:
             shot = e.screenshot or shot
             if e.signed_out:
                 notify.session_expired(str(e))
+            if e.maybe_submitted:
+                # Submit was pressed: never press it again on its own (no duplicate submissions); the user checks
+                _failed(post, "; ".join(errors), shot, final=True)
+                return False
         except Exception as e:
             errors.append(f"{m}: {e}")
     if not methods:
@@ -91,11 +95,11 @@ def attempt(post: dict, s: dict) -> bool:
     return False
 
 
-def _failed(post: dict, error: str, shot: str | None):
+def _failed(post: dict, error: str, shot: str | None, final: bool = False):
     n = (post.get("submit_attempts") or 0) + 1
     now = datetime.now(timezone.utc)
     deadline = post["submit_deadline"] or now
-    give_up = now > deadline + LATE_GRACE or "no submit method" in error
+    give_up = final or now > deadline + LATE_GRACE or "no submit method" in error
     nxt = None if give_up else now + timedelta(minutes=min(2 ** (n - 1), 8))
     db.q("""UPDATE posts SET submit_status=%s, submit_attempts=%s, submit_error=%s, submit_next_at=%s, updated_at=now()
             WHERE id=%s""", ("failed" if give_up else "pending", n, (error + (f" (screenshot: {shot})" if shot else ""))[:1500],
