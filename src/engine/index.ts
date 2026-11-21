@@ -11,3 +11,4 @@ export function applyAction(s: GameState, seat: number, a: BotAction): GameState
   return playCard(s, seat, a.cardId, a.joker);
 }
 export * from "./elo";
+export * from "./sheet";

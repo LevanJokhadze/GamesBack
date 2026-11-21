@@ -7,6 +7,7 @@ import pg from "pg";
 import { BOT_RATING, START_RATING, eloDeltas } from "./engine/elo";
 import { rankingScores } from "./engine/game";
 import type { FinishedGame, RatingChange } from "./room-core";
+import type { OfflineSheet } from "./offline";
 
 export interface User {
   id: string;
@@ -31,6 +32,8 @@ export interface Avatar {
 export interface GameRecord {
   id: string;
   finishedAt: string;
+  /** "offline" = played in person and written on a score sheet. */
+  source: string;
   mode: string;
   pairs: boolean;
   score: number;
@@ -56,6 +59,7 @@ export interface MatchPlayer {
 export interface Match {
   id: string;
   finishedAt: string;
+  source: string;
   mode: string;
   khishti: number;
   /** Played in pairs: seats 0 & 2 against 1 & 3; `place` is the team's place. */
@@ -100,6 +104,29 @@ export interface Store {
   rateGame(game: FinishedGame): Promise<{ matchId: string; changes: (RatingChange | null)[] }>;
   /** Takes rating points for leaving or not responding; returns the new rating. */
   penalize(userId: string, amount: number, reason: string, roomCode: string): Promise<number | null>;
+  /** Players whose nickname or name starts with (or contains) `q`, for picking players. */
+  searchUsers(q: string, limit: number): Promise<User[]>;
+  sheetGet(id: string): Promise<OfflineSheet | null>;
+  /** Writes a score sheet if its stored version is still `expectVersion` (null = new). */
+  sheetPut(sheet: OfflineSheet, expectVersion: number | null): Promise<boolean>;
+  /** Sheets a player is at, newest first. */
+  sheetList(userId: string, limit: number): Promise<OfflineSheet[]>;
+}
+
+/** Search text: trimmed, at most 30 characters. */
+export function cleanQuery(q: unknown): string {
+  return String(q ?? "").replace(/[\u0000-\u001f]/g, "").replace(/\s+/g, " ").trim().slice(0, 30);
+}
+
+function matchRank(u: Pick<User, "nickname" | "firstName" | "lastName">, q: string): number {
+  const l = q.toLowerCase();
+  const nick = u.nickname.toLowerCase();
+  const full = `${u.firstName} ${u.lastName}`.toLowerCase();
+  if (nick === l) return 0;
+  if (nick.startsWith(l)) return 1;
+  if (u.firstName.toLowerCase().startsWith(l) || u.lastName.toLowerCase().startsWith(l) || full.startsWith(l)) return 2;
+  if (nick.includes(l) || full.includes(l)) return 3;
+  return -1;
 }
 
 // ---------- validation helpers ----------
@@ -196,8 +223,40 @@ export class MemoryStore implements Store {
   private users = new Map<string, User & { tokenHash: string; avatar: Avatar; passwordHash: string | null }>();
   private sessions = new Map<string, string>();
   private games: { id: string; finishedAt: string; game: FinishedGame; changes: (RatingChange | null)[] }[] = [];
+  private sheets = new Map<string, OfflineSheet>();
 
   async init() {}
+
+  async searchUsers(q: string, limit: number) {
+    const c = cleanQuery(q);
+    if (!c) return [];
+    return [...this.users.values()]
+      .map((u) => ({ u, r: matchRank(u, c) }))
+      .filter((x) => x.r >= 0)
+      .sort((a, b) => a.r - b.r || b.u.games - a.u.games || a.u.nickname.localeCompare(b.u.nickname))
+      .slice(0, limit)
+      .map((x) => this.pub(x.u));
+  }
+
+  async sheetGet(id: string) {
+    const s = this.sheets.get(id);
+    return s ? structuredClone(s) : null;
+  }
+
+  async sheetPut(sheet: OfflineSheet, expectVersion: number | null) {
+    const cur = this.sheets.get(sheet.id);
+    if (expectVersion === null ? !!cur : cur?.version !== expectVersion) return false;
+    this.sheets.set(sheet.id, structuredClone(sheet));
+    return true;
+  }
+
+  async sheetList(userId: string, limit: number) {
+    return [...this.sheets.values()]
+      .filter((s) => s.players.includes(userId))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, limit)
+      .map((s) => structuredClone(s));
+  }
 
   private nickTaken(nick: string, exceptId?: string): boolean {
     for (const u of this.users.values()) if (u.id !== exceptId && u.nickname.toLowerCase() === nick.toLowerCase()) return true;
@@ -298,6 +357,7 @@ export class MemoryStore implements Store {
         return {
           id: g.id,
           finishedAt: g.finishedAt,
+          source: g.game.source ?? "online",
           mode: g.game.mode,
           pairs: Boolean(g.game.pairs),
           score: g.game.totals[i],
@@ -316,6 +376,7 @@ export class MemoryStore implements Store {
     return {
       id: g.id,
       finishedAt: g.finishedAt,
+      source: g.game.source ?? "online",
       mode: g.game.mode,
       khishti: g.game.khishti,
       pairs: Boolean(g.game.pairs),
@@ -412,6 +473,7 @@ CREATE TABLE IF NOT EXISTS games (
   pulkas jsonb NOT NULL DEFAULT '[]'
 );
 ALTER TABLE games ADD COLUMN IF NOT EXISTS pairs boolean NOT NULL DEFAULT false;
+ALTER TABLE games ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'online';
 CREATE TABLE IF NOT EXISTS game_players (
   game_id uuid NOT NULL REFERENCES games(id) ON DELETE CASCADE,
   seat int NOT NULL,
@@ -424,6 +486,16 @@ CREATE TABLE IF NOT EXISTS game_players (
   PRIMARY KEY (game_id, seat)
 );
 CREATE INDEX IF NOT EXISTS game_players_user_idx ON game_players (user_id, game_id);
+CREATE TABLE IF NOT EXISTS offline_sheets (
+  id uuid PRIMARY KEY,
+  created_by uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  players uuid[] NOT NULL,
+  status text NOT NULL,
+  version int NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  data jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS offline_sheets_players_idx ON offline_sheets USING gin (players);
 `;
 
 const USER_COLS = `id, nickname, first_name, last_name, rating, games, wins, peak, avatar_version, created_at, (password_hash IS NOT NULL) AS has_password`;
@@ -555,7 +627,7 @@ export class PgStore implements Store {
   async recentGames(id: string, limit: number, before?: string) {
     if (!UUID_RE.test(id)) return [];
     const { rows } = await this.pool.query(
-      `SELECT g.id, g.finished_at, g.mode, g.pairs, gp.score, gp.place, gp.rating_before, gp.rating_after,
+      `SELECT g.id, g.finished_at, g.source, g.mode, g.pairs, gp.score, gp.place, gp.rating_before, gp.rating_after,
               (SELECT json_agg(json_build_object('name', o.name, 'userId', o.user_id, 'score', o.score, 'place', o.place) ORDER BY o.seat)
                  FROM game_players o WHERE o.game_id = g.id) AS players
        FROM game_players gp JOIN games g ON g.id = gp.game_id
@@ -566,6 +638,7 @@ export class PgStore implements Store {
     return rows.map((r) => ({
       id: String(r.id),
       finishedAt: new Date(r.finished_at).toISOString(),
+      source: String(r.source ?? "online"),
       mode: String(r.mode),
       pairs: Boolean(r.pairs),
       score: Number(r.score),
@@ -578,7 +651,7 @@ export class PgStore implements Store {
 
   async match(id: string) {
     if (!UUID_RE.test(id)) return null;
-    const g = await this.pool.query(`SELECT id, finished_at, mode, khishti, pairs, pulkas FROM games WHERE id = $1`, [id]);
+    const g = await this.pool.query(`SELECT id, finished_at, source, mode, khishti, pairs, pulkas FROM games WHERE id = $1`, [id]);
     if (!g.rows[0]) return null;
     const p = await this.pool.query(
       `SELECT gp.seat, gp.name, gp.user_id, gp.score, gp.place, gp.rating_before, gp.rating_after, u.avatar_version
@@ -589,6 +662,7 @@ export class PgStore implements Store {
     return {
       id: String(r.id),
       finishedAt: new Date(r.finished_at).toISOString(),
+      source: String(r.source ?? "online"),
       mode: String(r.mode),
       khishti: Number(r.khishti),
       pairs: Boolean(r.pairs),
@@ -605,6 +679,59 @@ export class PgStore implements Store {
         ratingAfter: x.rating_after === null ? null : Number(x.rating_after),
       })),
     };
+  }
+
+  async searchUsers(q: string, limit: number) {
+    const c = cleanQuery(q);
+    if (!c) return [];
+    const { rows } = await this.pool.query(
+      `SELECT ${USER_COLS} FROM users
+       WHERE position(lower($1) in lower(nickname)) > 0
+          OR position(lower($1) in lower(first_name || ' ' || last_name)) > 0
+       ORDER BY (lower(nickname) = lower($1)) DESC, (lower(nickname) LIKE (lower($2) || '%')) DESC, games DESC, nickname
+       LIMIT $3`,
+      [c, c.replace(/[\\%_]/g, "\\$&"), limit * 3],
+    );
+    return rows
+      .map(rowToUser)
+      .map((u) => ({ u, r: matchRank(u, c) }))
+      .filter((x) => x.r >= 0)
+      .sort((a, b) => a.r - b.r || b.u.games - a.u.games)
+      .slice(0, limit)
+      .map((x) => x.u);
+  }
+
+  async sheetGet(id: string) {
+    if (!UUID_RE.test(id)) return null;
+    const { rows } = await this.pool.query(`SELECT data FROM offline_sheets WHERE id = $1`, [id]);
+    return rows[0] ? (rows[0].data as OfflineSheet) : null;
+  }
+
+  async sheetPut(sheet: OfflineSheet, expectVersion: number | null) {
+    const args = [sheet.id, sheet.createdBy, sheet.players, sheet.status, sheet.version, sheet.updatedAt, JSON.stringify(sheet)];
+    if (expectVersion === null) {
+      const r = await this.pool.query(
+        `INSERT INTO offline_sheets (id, created_by, players, status, version, updated_at, data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (id) DO NOTHING`,
+        args,
+      );
+      return r.rowCount === 1;
+    }
+    const r = await this.pool.query(
+      `UPDATE offline_sheets SET players = $3, status = $4, version = $5, updated_at = $6, data = $7
+       WHERE id = $1 AND created_by = $2 AND version = $8`,
+      [...args, expectVersion],
+    );
+    return r.rowCount === 1;
+  }
+
+  async sheetList(userId: string, limit: number) {
+    if (!UUID_RE.test(userId)) return [];
+    const { rows } = await this.pool.query(
+      `SELECT data FROM offline_sheets WHERE players @> ARRAY[$1::uuid] ORDER BY updated_at DESC LIMIT $2`,
+      [userId, limit],
+    );
+    return rows.map((r) => r.data as OfflineSheet);
   }
 
   async penalize(userId: string, amount: number, reason: string, roomCode: string) {
@@ -627,8 +754,8 @@ export class PgStore implements Store {
       const changes = computeChanges(game, users);
       const pl = places(game.totals, game.pairs);
       const g = await client.query(
-        `INSERT INTO games (room_code, mode, totals, khishti, pairs, pulkas) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-        [game.code, game.mode, game.totals, game.khishti, Boolean(game.pairs), JSON.stringify(game.pulkas)],
+        `INSERT INTO games (room_code, mode, totals, khishti, pairs, pulkas, source) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [game.code, game.mode, game.totals, game.khishti, Boolean(game.pairs), JSON.stringify(game.pulkas), game.source ?? "online"],
       );
       for (let i = 0; i < game.userIds.length; i++) {
         const c = changes[i];

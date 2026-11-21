@@ -33,6 +33,7 @@ Frontend: [LevanJokhadze/Games](https://github.com/LevanJokhadze/Games).
   10 per IP per 10 minutes.
 - **Chess Elo**: every finished game with at least one account is rated (see below). Global
   leaderboard, per-player match history and a full summary of every match.
+- **Score sheet for games played in person** (`src/offline.ts`, `src/engine/sheet.ts`): see below.
 - **Play in pairs**: partners sit opposite (seats 1 & 3 against 2 & 4), team points are added up
   and the team with more points wins.
 
@@ -67,6 +68,28 @@ Everyone starts at 1500.
 
 Code: `src/engine/elo.ts`, applied in `src/store.ts` inside one transaction per game.
 
+## Score sheet (games played in person)
+
+For games played with real cards. One player (the scorekeeper) creates a sheet with **four
+registered accounts** (not typed names; they must be four different accounts and the scorekeeper
+must be one of them), the seating order, who deals first, game type, khishti and pairs. Each deal
+they write everyone's bid and tricks taken. The server checks every deal with the online rules
+(bids 0..cards, the dealer can't make the bids add up to the number of cards, tricks add up to the
+number of cards) and scores it with the same code as online games (`scoreDeal`, `closePulka`), so
+points, premium and pairs totals are identical; a test replays bot games through the sheet to
+prove it.
+
+Against rating abuse: a sheet changes ratings **only when all four players have confirmed it from
+their own accounts**. The scorekeeper's "finish" counts as their confirmation. Any player can send
+it back for a correction instead; any edit clears all confirmations, so nobody confirms numbers
+they haven't seen. Only the four players can open a sheet, only the scorekeeper writes it, and one
+person can keep at most 3 unfinished sheets. A confirmed game is stored like an online one
+(`games.source = 'offline'`) and counts for Elo (same formula, no bots), games/wins, the
+leaderboard and match history.
+
+Sheets are stored in `offline_sheets` (one JSON row per sheet with a version number; every write
+must name the version it read, so two phones can't overwrite each other).
+
 ## Development
 
 ```bash
@@ -96,6 +119,11 @@ npm run simulate   # play 200 bot-only games and print bot accuracy
 | GET | `/api/users/:id/games?limit=20&before=<ISO time>` | Match history, newest first, paged |
 | GET | `/api/users/:id/avatar` | Profile photo |
 | GET | `/api/games/:id` | Match summary: players, places, rating changes, every deal |
+| GET | `/api/users/search?q=` | Find registered players by nickname or name (needs a token) |
+| GET / POST | `/api/sheets` | Your open score sheets / create one `{players: [4 user ids], firstDealer, config}` |
+| GET / DELETE | `/api/sheets/:id` | A sheet with its scores (players only) / delete it (scorekeeper, not once rated) |
+| PUT | `/api/sheets/:id/deals` | `{version, deals: [{bids: [4], took: [4] or null}]}` (scorekeeper) |
+| POST | `/api/sheets/:id/submit`, `/confirm`, `/reject` | `{version}`: finish, confirm, send back for a correction |
 | GET | `/api/ice` | `{iceServers}`: voice relay (TURN) servers for the browser, empty when none is set |
 
 WebSocket messages from the client (JSON): `hello {token}` (send first; without accounts

@@ -53,6 +53,8 @@ export interface UserInfo {
 
 export interface FinishedGame {
   code: string;
+  /** "offline" = played in person and written on a score sheet. Default "online". */
+  source?: "online" | "offline";
   mode: string;
   khishti: number;
   /** Played in pairs (seats 0 & 2 against 1 & 3). */

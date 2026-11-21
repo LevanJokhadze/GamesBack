@@ -319,9 +319,31 @@ export function dealPoints(bid: number, took: number, handSize: number, khishti:
   return 10 * took;
 }
 
+/** Points of one finished deal, by seat. */
+export function scoreDeal(handSize: number, bids: number[], took: number[], khishti: number): DealResult {
+  return { handSize, bids: bids.slice(), took: took.slice(), points: bids.map((b, i) => dealPoints(b, took[i], handSize, khishti)) };
+}
+
+/**
+ * End of a pulka: premium for anyone who hit every bid; their best deal of the pulka counts
+ * twice. Updates the pulka and returns the bonus by seat.
+ */
+export function closePulka(pulka: PulkaResult): number[] {
+  for (let i = 0; i < SEATS; i++) {
+    const hitAll = pulka.deals.every((d) => d.bids[i] === d.took[i]);
+    if (hitAll) {
+      if (!pulka.premium.includes(i)) pulka.premium.push(i);
+      const best = Math.max(...pulka.deals.map((d) => d.points[i]));
+      pulka.bonus[i] = best;
+      pulka.total[i] += best;
+    }
+  }
+  return pulka.bonus.slice();
+}
+
 function finishDeal(s: GameState): GameState {
   const bids = s.bids.map((b) => b ?? 0);
-  const points = bids.map((b, i) => dealPoints(b, s.took[i], s.handSize, s.config.khishti));
+  const { points } = scoreDeal(s.handSize, bids, s.took, s.config.khishti);
   const pulka = s.pulkas[s.pulka];
   pulka.deals.push({ handSize: s.handSize, bids, took: s.took.slice(), points });
   for (let i = 0; i < SEATS; i++) {
@@ -335,17 +357,8 @@ function finishDeal(s: GameState): GameState {
   if (s.dealInPulka + 1 < pulkaSizes.length) {
     s.dealInPulka += 1;
   } else {
-    // End of pulka: premium for anyone who hit every bid. Their best hand counts twice.
-    for (let i = 0; i < SEATS; i++) {
-      const hitAll = pulka.deals.every((d) => d.bids[i] === d.took[i]);
-      if (hitAll) {
-        pulka.premium.push(i);
-        const best = Math.max(...pulka.deals.map((d) => d.points[i]));
-        pulka.bonus[i] = best;
-        pulka.total[i] += best;
-        s.totals[i] += best;
-      }
-    }
+    const bonus = closePulka(pulka);
+    for (let i = 0; i < SEATS; i++) s.totals[i] += bonus[i];
     if (s.pulka + 1 >= s.schedule.length) {
       s.phase = "gameOver";
       s.hands = [[], [], [], []];
