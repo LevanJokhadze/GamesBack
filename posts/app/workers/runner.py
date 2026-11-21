@@ -63,5 +63,8 @@ def _loop(name: str, fn, every: int):
 
 
 def start():
+    from .. import config
     for name, (fn, every) in WORKERS.items():
+        if config.ONLY_WORKERS and name not in config.ONLY_WORKERS:
+            continue
         threading.Thread(target=_loop, args=(name, fn, every), name=f"worker-{name}", daemon=True).start()

@@ -20,20 +20,26 @@ def day_cap(service: str, s: dict) -> int:
     return int(caps.get(service) or s.get("max_posts_per_day") or 3)
 
 
+def min_gap(s: dict) -> int:
+    """Seconds that must separate two posts on one account (spaces out same-streamer posts)."""
+    return int(float(s.get("min_gap_minutes") or 60) * 60)
+
+
 def next_slot(channel_id: str, service: str, s: dict, after: datetime) -> datetime:
-    """Next posting time from the US-Eastern slots that is not within an hour of another post on this channel and
-    whose day still has room. Days are counted in Buffer's own timezone, the one its daily limits use."""
+    """Next posting time from the US-Eastern slots that is at least `min_gap_minutes` from any other post on this
+    channel and whose day still has room. Days are counted in Buffer's own timezone, the one its daily limits use."""
     slots = sorted(s.get("slots_et") or ["19:00"])
     taken = [r["due_at"] for r in db.q("""SELECT due_at FROM posts WHERE channel_id=%s AND status <> 'deleted'
                                           AND due_at > now() - interval '2 days'""", (channel_id,))]
     cap = day_cap(service, s)
+    gap = min_gap(s)
     btz = ZoneInfo(s.get("buffer_timezone") or "Asia/Tbilisi")
     day = after.astimezone(ET).date()
     for _ in range(30):
         for hhmm in slots:
             h, mi = map(int, hhmm.split(":"))
             t = datetime(day.year, day.month, day.day, h, mi, tzinfo=ET).astimezone(timezone.utc)
-            if t <= after or any(abs((x - t).total_seconds()) < 3600 for x in taken):
+            if t <= after or any(abs((x - t).total_seconds()) < gap for x in taken):
                 continue
             if sum(1 for x in taken if x.astimezone(btz).date() == t.astimezone(btz).date()) >= cap:
                 continue
