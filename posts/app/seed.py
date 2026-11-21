@@ -145,3 +145,17 @@ def drop_kreekcraft():
             WHERE EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'kreekcraft')""")
     if done:
         db.set_setting(DROP_KREEK_KEY, True)
+
+
+LAYOUT_KEY = "layout_whole_frame_2026_11_21"
+
+
+def whole_frame_layout():
+    """Once (21 Nov 2026): Twitch clips are too soft to zoom into, so every campaign switches from the react layout
+    (webcam panel + gameplay cropped ~2x) to the whole stream frame on a blurred background. Campaigns page can
+    switch a campaign back."""
+    if db.settings().get(LAYOUT_KEY):
+        return
+    db.q("UPDATE campaigns SET layout='blur'")
+    db.set_setting(LAYOUT_KEY, True)
+    db.log("seed", "all campaigns now use the whole-frame layout (sharper than the zoomed react layout)")
