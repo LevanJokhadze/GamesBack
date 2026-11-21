@@ -187,6 +187,13 @@ ALTER TABLE posts ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_deadline TIMESTAMPTZ;
 ALTER TABLE posts ADD COLUMN IF NOT EXISTS submit_alerted_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS posts_submit ON posts(submit_status) WHERE submit_status IN ('pending', 'failed');
+-- hook-first editing (hook.py): clip length around the payoff, teaser of the payoff at 0:00, punch-in zooms
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS target_secs REAL DEFAULT 18;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS teaser BOOLEAN DEFAULT TRUE;
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS punch_zoom BOOLEAN DEFAULT TRUE;
+-- the on-screen hook burned into the clip, and how it was cut (start/end, payoff, teaser, zooms, candidates)
+ALTER TABLE clips ADD COLUMN IF NOT EXISTS hook_text TEXT;
+ALTER TABLE clips ADD COLUMN IF NOT EXISTS edit_plan JSONB;
 """
 
 # Geos created on first start (names only, no account data)
@@ -196,10 +203,14 @@ DEFAULT_SETTINGS = {
     "auto_approve": False,
     "workers_paused": False,
     # Posting slots in US Eastern time (HH:MM). Each channel gets at most one post per slot.
-    "slots_et": ["12:00", "19:00", "21:00"],
-    "max_posts_per_day": 3,
-    # Buffer refuses more than 2 YouTube posts a day on this channel
-    "max_per_day_by_service": {"youtube": 2},
+    # 12:00 and 15:00 ET = 21:00 and 00:00 Tbilisi: US lunch and after school, both while the user is awake.
+    "slots_et": ["12:00", "15:00"],
+    # 1-2 posts a day per account: more clips of the same streamer on one day get fewer impressions each
+    "max_posts_per_day": 2,
+    # YouTube showed 0 impressions after 3 same-streamer Shorts in one day: one a day there
+    "max_per_day_by_service": {"youtube": 1},
+    # never two posts on the same account closer than this
+    "min_gap_minutes": 150,
     # timezone of the Buffer account: its daily limits count days in this zone
     "buffer_timezone": "Asia/Tbilisi",
     # Buffer's free plan keeps at most 10 scheduled posts per channel at a time

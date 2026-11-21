@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import accounts, assistant, assistant_live, auth, calendar, config, db, seed, submit_api
+from . import accounts, assistant, assistant_live, auth, calendar, captions, config, db, seed, submit_api
 from .workers import runner
 
 app = FastAPI(title="posts.lane.ge API")
@@ -26,6 +26,7 @@ def startup():
     db.migrate()
     seed.run()
     seed.switch_campaign()
+    seed.posting_plan()
     # a restart (deploy, crash) mid-render leaves moments marked 'rendering': put them back in the queue
     stuck = db.q("UPDATE moments SET status='new', updated_at=now() WHERE status='rendering' RETURNING id")
     if stuck:
@@ -112,7 +113,7 @@ class ClipEdit(BaseModel):
 @app.patch("/api/clips/{clip_id}", dependencies=[A])
 def edit_clip(clip_id: int, body: ClipEdit):
     if body.caption is not None:
-        db.q("UPDATE clips SET caption=%s WHERE id=%s", (body.caption, clip_id))
+        db.q("UPDATE clips SET caption=%s WHERE id=%s", (captions.clean(body.caption), clip_id))
     if body.title is not None:
         db.q("UPDATE clips SET title=%s WHERE id=%s", (body.title, clip_id))
     return {"ok": True}
@@ -191,7 +192,7 @@ def retry_moment(moment_id: int):
 CAMPAIGN_FIELDS = ["name", "url", "cpm", "min_payout", "max_payout", "channels", "game", "caption_template", "overlay_url",
                    "overlay_width", "overlay_y", "captions", "cam_box", "title_secs", "daily_quota", "min_clip_views",
                    "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes",
-                   "streamer_name", "ended_at", "end_reason"]
+                   "streamer_name", "ended_at", "end_reason", "target_secs", "teaser", "punch_zoom"]
 
 
 @app.get("/api/campaigns", dependencies=[A])

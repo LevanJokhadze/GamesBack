@@ -90,3 +90,31 @@ def switch_campaign():
     db.set_setting(SWITCH_KEY, True)
     db.log("seed", "KreekCraft campaign ended (rate cut to $0.50/1K); Bobby VanRiper GTA VI is now the active campaign, "
                    "Boeshi added as an inactive backup")
+
+
+# --- 21 Nov 2026: viewers swiped away in the first 1-2 s, and 3 same-streamer Shorts a day got 0 impressions ---
+PLAN_KEY = "posting_plan_2026_11_21"
+
+
+def posting_plan():
+    """Once: 2 slots a day (12:00 and 15:00 ET = 21:00 and 00:00 Tbilisi), at most 2 posts a day per account and 1 on
+    YouTube, 2.5 h between posts on an account, 2 clips cut a day per active campaign (no more than can be posted),
+    and the hashtags of clips not posted yet cleaned (captions.clean). Hook-first editing is on for every campaign
+    through the column defaults (target_secs 18, teaser, punch_zoom)."""
+    from . import captions
+    if db.settings().get(PLAN_KEY):
+        return
+    db.set_setting("slots_et", ["12:00", "15:00"])
+    db.set_setting("max_posts_per_day", 2)
+    caps = dict(db.settings().get("max_per_day_by_service") or {})
+    caps["youtube"] = 1
+    db.set_setting("max_per_day_by_service", caps)
+    db.set_setting("min_gap_minutes", 150)
+    db.q("UPDATE campaigns SET daily_quota = LEAST(COALESCE(daily_quota, 2), 2) WHERE active")
+    for c in db.q("SELECT id, caption FROM clips WHERE status IN ('review','approved','scheduled') AND caption IS NOT NULL"):
+        fixed = captions.clean(c["caption"])
+        if fixed != c["caption"]:
+            db.q("UPDATE clips SET caption=%s WHERE id=%s", (fixed, c["id"]))
+    db.set_setting(PLAN_KEY, True)
+    db.log("seed", "posting plan: 2 slots a day (21:00 and 00:00 Tbilisi), max 2 posts a day per account and 1 on "
+                   "YouTube, 2.5 h apart; 2 clips cut a day; clips open on their payoff with a text hook")
