@@ -31,6 +31,7 @@ def startup():
     seed.posting_plan()
     seed.drop_kreekcraft()
     seed.whole_frame_layout()
+    seed.bobby_caption()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)
