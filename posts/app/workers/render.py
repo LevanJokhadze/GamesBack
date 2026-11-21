@@ -64,6 +64,18 @@ class Skip(Exception):
     pass
 
 
+def apply_title_template(c: dict, title: str) -> str:
+    """The campaign's title wrapper, e.g. 'twitch: evelone2004 {title} #evelone' when a brief wants the Twitch
+    channel in the Shorts title. YouTube cuts titles over 100 characters, so the model's part is shortened to fit."""
+    tpl = c.get("title_template") or "{title}"
+    if "{title}" not in tpl or not title:
+        return title
+    room = 100 - len(tpl.replace("{title}", ""))
+    if len(title) > room:
+        title = title[:max(room - 1, 10)].rstrip() + "…"
+    return re.sub(r"\s+", " ", tpl.replace("{title}", title)).strip()
+
+
 def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     """Download, transcribe, plan and edit one moment into work/final.mp4. No database or upload, so
     scripts/sample_render.py can run it on its own. Returns the final file, the texts and the edit plan."""
@@ -86,10 +98,10 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     streamer = c.get("streamer_name") or next((w for w in (c["name"] or "").split() if w.lower() == (m["channel"] or "").lower()),
                     (m["channel"] or "").capitalize())
     cands = hook.candidates(hook.loudness(job / "audio.wav"), words, dur_src)
-    t = titles.make(m["title"] or "", transcript, streamer, words=words, cands=cands)
+    t = titles.make(m["title"] or "", transcript, streamer, words=words, cands=cands, language=c.get("language") or "en")
     if screen:  # re-render: keep the on-screen hook the clip already has
         t["screen"] = screen
-    title = t["title"] or (m["title"] or "")
+    title = apply_title_template(c, t["title"] or (m["title"] or ""))
     # the payoff the clip opens on: the model's pick from the candidates, else the loudest moment
     pick = cands[t["payoff"]] if t.get("payoff") is not None else (cands[0] if cands else None)
     second = next((x["t"] for x in cands if pick and x is not pick), None)

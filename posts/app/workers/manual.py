@@ -65,13 +65,19 @@ def pick_clip(account: dict, exclude: list[int] | None = None) -> dict | None:
                           AND p.channel_id IN (%(ch)s, %(mch)s))
           AND (cardinality(%(st)s::text[]) = 0
                OR EXISTS (SELECT 1 FROM unnest(ca.channels) x WHERE lower(x) = ANY(%(st)s::text[])))
+          -- a campaign for a geo (e.g. RU) goes only to that geo's accounts; one without a geo goes to the rest
+          AND CASE WHEN NULLIF(ca.geo, '') IS NOT NULL
+                   THEN upper(ca.geo) = (SELECT upper(code) FROM geos WHERE id = %(g)s)
+                   ELSE NOT EXISTS (SELECT 1 FROM campaigns x JOIN geos g ON upper(g.code) = upper(x.geo)
+                                    WHERE g.id = %(g)s) END
         ORDER BY
           (SELECT count(*) FROM manual_uploads mu JOIN accounts a ON a.id = mu.account_id
              WHERE mu.clip_id = c.id AND a.platform = %(pf)s)
           + (SELECT count(*) FROM posts p WHERE p.clip_id = c.id AND p.service = %(pf)s AND p.status <> 'deleted'),
           c.approved_at DESC
         LIMIT 1""", {"a": account["id"], "ch": account.get("buffer_channel_id") or "", "mch": f"manual:{account['id']}",
-                     "st": streamers, "pf": account["platform"], "ex": list(exclude or [])})
+                     "st": streamers, "pf": account["platform"], "ex": list(exclude or []),
+                     "g": account.get("geo_id")})
 
 
 def send_one(account: dict, slot: datetime) -> dict | None:

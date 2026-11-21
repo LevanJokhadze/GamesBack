@@ -197,6 +197,13 @@ ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS layout TEXT DEFAULT 'react';
 -- the on-screen hook burned into the clip, and how it was cut (start/end, payoff, teaser, zooms, candidates)
 ALTER TABLE clips ADD COLUMN IF NOT EXISTS hook_text TEXT;
 ALTER TABLE clips ADD COLUMN IF NOT EXISTS edit_plan JSONB;
+-- Russian-speaking campaigns (titles.py writes the hook, title and caption line in this language) and the geo
+-- (geos.code) whose accounts get the campaign's clips. NULL geo = the default (US) accounts and unlinked Buffer
+-- channels, so a Russian campaign never lands on the US accounts and the other way round.
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS language TEXT DEFAULT 'en';
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS geo TEXT;
+-- post title wrapper: '{title}' or e.g. 'twitch: evelone2004 {title} #evelone' when a brief wants it in the title
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS title_template TEXT DEFAULT '{title}';
 """
 
 # Geos created on first start (names only, no account data)

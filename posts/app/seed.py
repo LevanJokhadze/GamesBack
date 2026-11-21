@@ -257,3 +257,51 @@ def retry_oom_renders():
     db.q("""UPDATE moments SET status='new', reason=NULL, updated_at=now()
             WHERE status='failed' AND reason LIKE 'ffmpeg failed:%%' AND updated_at > now() - interval '2 days'""")
     db.set_setting("retry_oom_renders_2026_11_21", True)
+
+
+EVELONE_BRIEF = """Evelone TikTok/Shorts contest (t.me/EveloneTiktok, read 21 Nov 2026):
+- TikTok and YouTube Shorts. Evelone must be the main face of the video, or it is rejected.
+- #evelone and the Twitch channel in the description (in the title of a Short): "twitch: evelone2004 ...".
+- Cover every ad banner in the video. No botted views/likes/comments. No politics, conflicts or bait negativity.
+- At most 2 accounts per person. No re-uploads of other clippers' videos. Each video is paid once.
+- Pay per video (views not summed): 100K+ $15, 250K+ $25, 500K+ $50, 1M+ $100.
+  Videos published 18-25 Nov 2026 are paid x2: $30 / $50 / $100 / $200.
+- Submit within 14 days of posting: https://forms.gle/T4fgMUmD8KmwNDdWA . Paid every 14 days."""
+
+STROGO_BRIEF = """Strogo TikTok/Shorts contest (t.me/strogotiktok, read 21 Nov 2026):
+- Your Telegram @username must be in the bio of the TikTok/YouTube channel.
+- Strogo must be the main face. Stream no older than 30 days, video no older than 7 days when submitted.
+- "twitch: strogo" (or twitch.tv/strogo) first in the description. Cover ad banners. No botting, no re-uploads.
+- Pay per Short (not summed): 100K+ $15, 500K+ $50 (max). Long cuts (5+ min) 15K+ views $25 (needs an established
+  channel of his cuts). Payouts around the 3rd, 13th and 23rd.
+- GTA 6 marathon contest (from 17 Nov 2026): most-viewed videos win 100K / 50K / 50K / 25K / 25K RUB.
+  The stream timer must be visible, the video must be about the GTA 6 marathon, and the description starts with
+  "twitch:StRoGo #GTA6 #марафон #StRoGo". Fill in the form once a video passes 250K views."""
+
+RU_CAMPAIGNS = [
+    # name, url, twitch login, streamer name, title template, caption template, cpm, min, max, rules
+    ("Evelone TikTok/Shorts contest", "https://t.me/EveloneTiktok", "evelone2004", "Эвелон",
+     "twitch: evelone2004 {title} #evelone", "twitch: evelone2004 {hook} #evelone #эвелон #shorts",
+     0.15, 15, 100, EVELONE_BRIEF),
+    ("Strogo TikTok/Shorts contest", "https://t.me/strogotiktok", "strogo", "Строго",
+     "{title} | twitch: strogo", "twitch: strogo {hook} #strogo #строго #shorts",
+     0.15, 15, 50, STROGO_BRIEF),
+]
+
+
+def russian_campaigns():
+    """Once: Evelone's and Strogo's Telegram clip contests as Russian-language campaigns for the RU geo only (the
+    Russian YouTube channel, manual uploads), any game, whole-frame layout. Active from the start (the user joined
+    both Telegram channels on 21 Nov 2026); each one's first clip waits in Review."""
+    key = "russian_campaigns_2026_11_21"
+    if db.settings().get(key):
+        return
+    for name, url, login, streamer, title_tpl, caption, cpm, mn, mx, rules in RU_CAMPAIGNS:
+        if db.one("SELECT 1 AS x FROM campaigns WHERE url=%s", (url,)):
+            continue
+        db.q("""INSERT INTO campaigns(name, url, cpm, min_payout, max_payout, channels, streamer_name, game, caption_template,
+                  title_template, rules, language, geo, layout, captions, daily_quota, min_clip_views, lookback_hours, active)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,NULL,%s,%s,%s,'ru','RU','blur','word',2,300,48,TRUE)""",
+             (name, url, cpm, mn, mx, [login], streamer, caption, title_tpl, rules))
+    db.set_setting(key, True)
+    db.log("seed", "added the Evelone and Strogo clip contests (Russian, RU geo only, active; first clip of each waits in Review)")

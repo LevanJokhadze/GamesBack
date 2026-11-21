@@ -48,6 +48,24 @@ def next_slot(channel_id: str, service: str, s: dict, after: datetime) -> dateti
     raise RuntimeError("no free slot in the next 30 days")
 
 
+def geo_routes() -> tuple[dict, set]:
+    """Buffer channel id -> its account's geo code, and the geo codes campaigns target explicitly. A campaign with a
+    geo (e.g. RU) posts only to that geo's channels; one without a geo posts to every other channel, including
+    Buffer channels not linked to any account (the default US ones)."""
+    by_channel = {r["buffer_channel_id"]: (r["code"] or "").upper()
+                  for r in db.q("""SELECT a.buffer_channel_id, g.code FROM accounts a JOIN geos g ON g.id = a.geo_id
+                                   WHERE a.buffer_channel_id IS NOT NULL""")}
+    targeted = {(r["geo"] or "").upper() for r in db.q("SELECT DISTINCT geo FROM campaigns WHERE NULLIF(geo, '') IS NOT NULL")}
+    return by_channel, targeted
+
+
+def geo_ok(campaign_geo: str | None, channel_geo: str | None, targeted: set) -> bool:
+    cg = (campaign_geo or "").upper()
+    if cg:
+        return (channel_geo or "") == cg
+    return (channel_geo or "") not in targeted
+
+
 RETRY_AFTER = 6 * 3600  # a channel that refused a clip is not asked again for this long
 
 
@@ -60,8 +78,13 @@ def run():
     wanted = s.get("services") or ["tiktok", "instagram", "youtube"]
     # only Buffer posts on the enabled platforms count here: a clip uploaded by hand somewhere still goes out on the rest
     # only clips of active campaigns: an ended campaign's leftover clips would use up the day's few posting slots
-    clips = db.q("""SELECT c.* FROM clips c JOIN campaigns ca ON ca.id = c.campaign_id AND ca.active
+    # a geo campaign's clips only while that geo has an automatic Buffer account (else they'd crowd out the rest)
+    clips = db.q("""SELECT c.*, ca.geo AS campaign_geo FROM clips c JOIN campaigns ca ON ca.id = c.campaign_id AND ca.active
                     WHERE c.status IN ('approved','scheduled') AND c.approved_at > now() - interval '4 days'
+                    AND (NULLIF(ca.geo, '') IS NULL
+                         OR EXISTS (SELECT 1 FROM accounts a JOIN geos g ON g.id = a.geo_id
+                                    WHERE upper(g.code) = upper(ca.geo) AND a.buffer_channel_id IS NOT NULL
+                                      AND a.upload_mode <> 'manual'))
                     AND (SELECT count(*) FROM posts p WHERE p.clip_id = c.id AND p.status <> 'deleted'
                          AND p.buffer_post_id IS NOT NULL AND p.service = ANY(%s)) < %s
                     ORDER BY c.approved_at LIMIT 20""", (wanted, len(wanted)))
@@ -74,6 +97,7 @@ def run():
     chans = sorted([ch for ch in buffer.channels() if ch["service"] in wanted and not ch.get("isQueuePaused")
                     and ch["id"] not in manual],
                    key=lambda ch: order.get(ch["service"], 99))
+    by_geo, targeted = geo_routes()
     stagger = int(s.get("stagger_minutes") or 15)
     n = 0
     # Buffer's free plan holds at most 10 queued posts per channel at a time
@@ -89,7 +113,7 @@ def run():
                                                          WHERE mu.clip_id=%s AND a.buffer_channel_id IS NOT NULL""",
                                                       (clip["id"],))}
         missing = [ch for ch in chans if ch["id"] not in have and f"{clip['id']}:{ch['id']}" not in refused
-                   and queued.get(ch["id"], 0) < cap_q]
+                   and queued.get(ch["id"], 0) < cap_q and geo_ok(clip["campaign_geo"], by_geo.get(ch["id"]), targeted)]
         if not missing:
             continue
         earliest = datetime.now(timezone.utc) + timedelta(minutes=20)
