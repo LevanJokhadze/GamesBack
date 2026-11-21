@@ -39,7 +39,8 @@ def test_geo_slots_use_the_geo_timezone():
     from datetime import datetime, timezone
     from app import db
     from app.workers import manual
-    s = dict(db.DEFAULT_SETTINGS)
+    s = {**db.DEFAULT_SETTINGS, "geo_slots": {"RU": {"tz": "Europe/Moscow", "slots": ["20:00", "15:00"]}}}
+    assert publish.slot_plan(db.DEFAULT_SETTINGS, "RU")[0].key == "Europe/Moscow"
     tz, slots = publish.slot_plan(s, "ru")
     assert tz.key == "Europe/Moscow" and slots == ["15:00", "20:00"]
     assert publish.slot_plan(s, "US")[0] is publish.ET and publish.slot_plan(s, None)[1] == ["12:00", "15:00"]
@@ -82,3 +83,13 @@ def test_a_number_as_clip_title_never_becomes_the_post_title(monkeypatch):
     assert "2848481" not in t["title"] and "HTTP 529" in t["why"]
     t = titles.make("Эвелон не ожидал такого от чата", "", "Эвелон", language="ru")
     assert t["title"] == "Эвелон не ожидал такого от чата" and t["why"]
+
+
+def test_a_geo_has_its_own_daily_limits():
+    s = {"max_posts_per_day": 2, "max_per_day_by_service": {"youtube": 1},
+         "geo_slots": {"RU": {"tz": "Europe/Moscow", "slots": ["12:00"], "per_day": {"tiktok": 4, "youtube": 2}}}}
+    assert publish.day_cap("tiktok", s, "RU") == 4 and publish.day_cap("youtube", s, "ru") == 2
+    assert publish.day_cap("instagram", s, "RU") == 2       # not listed for the geo: the general limit
+    assert publish.day_cap("tiktok", s) == 2 and publish.day_cap("youtube", s, "US") == 1
+    s["geo_slots"]["RU"]["per_day"] = {"default": 3, "youtube": "x"}
+    assert publish.day_cap("tiktok", s, "RU") == 3 and publish.day_cap("youtube", s, "RU") == 1

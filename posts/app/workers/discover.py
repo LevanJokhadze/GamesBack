@@ -1,4 +1,5 @@
-"""Discover: pull each campaign streamer's most-viewed Twitch clips and keep them as candidate moments."""
+"""Discover: pull each campaign streamer's most-viewed Twitch clips (the week's top 50, plus today's top 50 for
+campaigns that take low-view clips) and keep them as candidate moments."""
 from datetime import datetime, timedelta, timezone
 
 from .. import db
@@ -15,6 +16,14 @@ def run():
             except Exception as e:
                 db.log("discover", f"{login}: {e}", "error")
                 continue
+            if (c["min_clip_views"] or 0) < 100:
+                # a campaign that takes low-view clips also gets today's clips: they have not had time to reach
+                # the week's top 50
+                try:
+                    seen = {k["slug"] for k in clips}
+                    clips += [k for k in twitch.top_clips(login, "LAST_DAY", fallback=False) if k["slug"] not in seen]
+                except Exception as e:
+                    db.log("discover", f"{login}: today's clips: {e}", "warn")
             for k in clips:
                 created = datetime.fromisoformat(k["created_at"].replace("Z", "+00:00")) if k["created_at"] else None
                 if c["game"] and k["game"] != c["game"]:

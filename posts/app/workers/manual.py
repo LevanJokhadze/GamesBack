@@ -55,7 +55,7 @@ def next_slot(account: dict, s: dict, now: datetime | None = None) -> datetime |
     for t in slot_times(s, now, geo_of(account)):
         if t + WINDOW < now or t in done:
             continue
-        if _day_count(account["id"], t, btz) >= day_cap(account["platform"], s):
+        if _day_count(account["id"], t, btz) >= day_cap(account["platform"], s, geo_of(account)):
             continue
         return t
     return None
@@ -130,7 +130,7 @@ def run():
                 continue
             if db.one("SELECT 1 AS x FROM manual_uploads WHERE account_id=%s AND slot_at=%s", (a["id"], t)):
                 continue
-            if _day_count(a["id"], t, btz) >= day_cap(a["platform"], s):
+            if _day_count(a["id"], t, btz) >= day_cap(a["platform"], s, geo_of(a)):
                 continue
             try:
                 if send_one(a, t):

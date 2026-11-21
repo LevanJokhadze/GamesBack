@@ -216,8 +216,11 @@ DEFAULT_SETTINGS = {
     # 12:00 and 15:00 ET = 21:00 and 00:00 Tbilisi: US lunch and after school, both while the user is awake.
     "slots_et": ["12:00", "15:00"],
     # Accounts of other geos post at their own audience's hours: geo code -> timezone and local HH:MM slots.
-    # Russia: 15:00 (after school) and 20:00 (evening) Moscow time = 16:00 and 21:00 Tbilisi.
-    "geo_slots": {"RU": {"tz": "Europe/Moscow", "slots": ["15:00", "20:00"]}},
+    # "per_day" (by platform, or "default") replaces the daily limits below for that geo's accounts.
+    # Russia: five Moscow-time slots from noon to late evening = 13:00, 16:00, 19:00, 21:30 and 23:30 Tbilisi;
+    # two streamers' clips a day there, so TikTok takes 4 and YouTube 2.
+    "geo_slots": {"RU": {"tz": "Europe/Moscow", "slots": ["12:00", "15:00", "18:00", "20:30", "22:30"],
+                         "per_day": {"tiktok": 4, "youtube": 2}}},
     # 1-2 posts a day per account: more clips of the same streamer on one day get fewer impressions each
     "max_posts_per_day": 2,
     # YouTube showed 0 impressions after 3 same-streamer Shorts in one day: one a day there

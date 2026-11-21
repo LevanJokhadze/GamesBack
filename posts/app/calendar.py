@@ -87,8 +87,8 @@ def build(start: date, days: int, now: datetime | None = None) -> dict:
             k = r["slot_at"].astimezone(btz).date()
             per_day[k] = per_day.get(k, 0) + 1
         planned: list[int] = []
-        cap = day_cap(a["platform"], s)
         geo = manual.geo_of(a)
+        cap = day_cap(a["platform"], s, geo)
         tz = slot_plan(s, geo)[0]
         for t in _slots(s, max(lo, now - manual.WINDOW), hi, geo):
             if t in taken or t + manual.WINDOW < now:
@@ -124,6 +124,7 @@ def build(start: date, days: int, now: datetime | None = None) -> dict:
         if gtz is ET and gslots == sorted(s.get("slots_et") or ["19:00"]):
             continue
         geo_plan[code] = {"zone": zone_label(gtz), "slots": gslots,
+                          "per_day": {pf: min(day_cap(pf, s, code), len(gslots)) for pf in ("tiktok", "instagram", "youtube")},
                           "local": sorted({_local(t)["time"] for t in _slots(s, day0, day0 + timedelta(days=1), code)})}
     # the posting plan the workers follow, for the page's summary line
     plan = {"slots_local": slot_local, "geo_slots": geo_plan, "per_day": {pf: min(day_cap(pf, s), len(s.get("slots_et") or ["19:00"]))
