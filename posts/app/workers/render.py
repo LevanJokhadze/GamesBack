@@ -64,7 +64,7 @@ class Skip(Exception):
     pass
 
 
-def build(c: dict, m: dict, work: Path) -> dict:
+def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     """Download, transcribe, plan and edit one moment into work/final.mp4. No database or upload, so
     scripts/sample_render.py can run it on its own. Returns the final file, the texts and the edit plan."""
     (work / "src").mkdir(parents=True, exist_ok=True)
@@ -87,6 +87,8 @@ def build(c: dict, m: dict, work: Path) -> dict:
                     (m["channel"] or "").capitalize())
     cands = hook.candidates(hook.loudness(job / "audio.wav"), words, dur_src)
     t = titles.make(m["title"] or "", transcript, streamer, words=words, cands=cands)
+    if screen:  # re-render: keep the on-screen hook the clip already has
+        t["screen"] = screen
     title = t["title"] or (m["title"] or "")
     # the payoff the clip opens on: the model's pick from the candidates, else the loudest moment
     pick = cands[t["payoff"]] if t.get("payoff") is not None else (cands[0] if cands else None)
@@ -95,7 +97,7 @@ def build(c: dict, m: dict, work: Path) -> dict:
     plan = hook.plan(dur_src, pick["t"] if pick else None, words, target=c.get("target_secs") or 18,
                      teaser=use_teaser, second=second)
     cmd = [sys.executable, str(config.VENDOR / "cut.py"), str(job), "--start", f"{plan['start']:.2f}",
-           "--end", f"{plan['end']:.2f}", "--layout", "react", "--captions", c["captions"] or "word"]
+           "--end", f"{plan['end']:.2f}", "--layout", c.get("layout") or "react", "--captions", c["captions"] or "word"]
     if c["cam_box"]:
         cmd += ["--cam", c["cam_box"]]
     r = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=1800)
@@ -145,4 +147,43 @@ def render_one(c: dict, m: dict) -> int:
                       json.dumps({**plan, "candidates": cands, "payoff_by": "model" if t.get("payoff") is not None else "audio"})))
         return row["id"]
     finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+_rerendering: set[int] = set()
+
+
+def rerendering() -> list[int]:
+    return sorted(_rerendering)
+
+
+def rerender(clip_id: int) -> None:
+    """Render an existing clip again with the current editing (e.g. after a quality fix) and swap its video in place.
+    The clip keeps its id, title, caption, on-screen hook, status and posts. Posts Buffer has already queued keep the
+    video Buffer fetched when they were scheduled. Runs in the caller's thread; the API starts it in a background one."""
+    clip = db.one("SELECT * FROM clips WHERE id=%s", (clip_id,))
+    m = db.one("SELECT * FROM moments WHERE id=%s", (clip["moment_id"],))
+    c = db.one("SELECT * FROM campaigns WHERE id=%s", (clip["campaign_id"],))
+    work = config.WORK_DIR / f"re{clip_id}"
+    shutil.rmtree(work, ignore_errors=True)
+    _rerendering.add(clip_id)
+    db.log("render", f"clip #{clip_id}: re-rendering with the current editing")
+    try:
+        b = build(c, m, work, screen=clip.get("hook_text"))
+        thumb = work / "thumb.jpg"
+        sh(["ffmpeg", "-v", "error", "-y", "-ss", "1.5", "-i", str(b["final"]), "-frames:v", "1", "-vf", "scale=540:-2", str(thumb)])
+        slug = re.sub(r"[^a-z0-9]+", "-", (m["channel"] or "clip").lower())
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")  # new URL, so no browser or CDN serves the old file
+        video_url = blob.upload(b["final"], f"clips/{slug}-{m['id']}-r{stamp}.mp4", "video/mp4")
+        thumb_url = blob.upload(thumb, f"thumbs/{slug}-{m['id']}-r{stamp}.jpg", "image/jpeg")
+        plan = b["plan"]
+        db.q("UPDATE clips SET video_url=%s, thumb_url=%s, duration=%s, edit_plan=%s WHERE id=%s",
+             (video_url, thumb_url, b["duration"],
+              json.dumps({**plan, "candidates": b["candidates"], "rerendered_at": stamp}), clip_id))
+        db.log("render", f"clip #{clip_id}: re-rendered ({plan.get('source', '?')} source), new video is on the dashboard")
+    except Exception as e:
+        db.log("render", f"clip #{clip_id}: re-render failed: {e}", "error")
+        raise
+    finally:
+        _rerendering.discard(clip_id)
         shutil.rmtree(work, ignore_errors=True)
