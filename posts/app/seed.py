@@ -159,3 +159,39 @@ def whole_frame_layout():
     db.q("UPDATE campaigns SET layout='blur'")
     db.set_setting(LAYOUT_KEY, True)
     db.log("seed", "all campaigns now use the whole-frame layout (sharper than the zoomed react layout)")
+
+
+# --- 21 Nov 2026: Bobby's campaign is real but tiny ($35 of $1,000 paid to 7 clippers) and our account hit its limit of
+# 3 pending clips; switch new clips to DiegoLoveless GTA 6 (ClipLaunch, $820 of $1,400 already paid to 106 clippers) ---
+DIEGO_KEY = "campaign_diego_2026_11_21"
+DIEGO_URL = "https://contentrewards.com/c/campaigns/5d37d3dd-adf3-401f-9c62-24bb54d5087a"
+DIEGO_CAPTION = "{hook} Watch Diego live at twitch.tv/diegoloveless #diegoloveless #gta6 #gtavi #twitchclips"
+DIEGO_RULES = """Content Rewards / ClipLaunch brief (Notion "DiegoLoveless GTA 6: Full Rules Brief", read 21 Nov 2026):
+- Only Diego's Grand Theft Auto Twitch streams (twitch.tv/diegoloveless); he is speedrunning GTA 6 this week.
+  Funny moments, reactions, standout gameplay, speedrun highlights. No low-effort screen recordings.
+- Caption: twitch.tv/diegoloveless on screen or in the caption, plus a clear CTA to his Twitch.
+- Likes visible; at least 0.8% engagement. Any page, no bio requirement. Overlay optional (link in the brief).
+- TikTok, Instagram and YouTube: $1 per 1K views, min payout $2 (2,000 views), max $300 per clip.
+- Budget $1,400 ($820 paid on 21 Nov). ClipLaunch Discord for announcements."""
+
+
+def diego_campaign():
+    """Once: DiegoLoveless GTA 6 becomes the active campaign (whole-frame layout, 2 clips a day, his small channel
+    gets low-view clips too); Bobby VanRiper is turned off (kept with its clips and posts; his Content Rewards page
+    allows only 3 pending clips per clipper and ours are all used)."""
+    if db.settings().get(DIEGO_KEY):
+        return
+    if not db.one("SELECT 1 AS x FROM campaigns WHERE url=%s", (DIEGO_URL,)):
+        db.q("""INSERT INTO campaigns(name, url, cpm, min_payout, max_payout, channels, streamer_name, game,
+                  caption_template, overlay_url, captions, cam_box, title_secs, daily_quota, min_clip_views, lookback_hours,
+                  rules, active, submit_window_minutes, layout)
+                VALUES (%s,%s,1,2,300,%s,'DiegoLoveless','Grand Theft Auto VI',%s,NULL,'word',NULL,5,2,10,72,%s,TRUE,30,
+                        'blur')""",
+             ("DiegoLoveless GTA 6 Clipping", DIEGO_URL, ["diegoloveless"], DIEGO_CAPTION, DIEGO_RULES))
+    db.q("UPDATE campaigns SET active=FALSE WHERE 'bobby_vanriper' = ANY(channels)")
+    db.q("""UPDATE accounts SET streamers = array_append(streamers, 'diegoloveless')
+            WHERE EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'bobby_vanriper')
+              AND NOT EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'diegoloveless')""")
+    db.set_setting(DIEGO_KEY, True)
+    db.log("seed", "DiegoLoveless GTA 6 is now the active campaign ($1/1K, min 2,000 views); Bobby VanRiper turned off "
+                   "(3-pending-clip limit reached on Content Rewards)")
