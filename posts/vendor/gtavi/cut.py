@@ -117,6 +117,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 CAP_Y = {"fill": 1380, "blur": 1460, "facecam": 1120, "react": 1560}
 TOP = 730  # react layout: face panel height = seam y (even)
 GAME_H = H - TOP  # 1190
+# Twitch clips are soft (1080p HEVC at ~3.5 Mbps) and the react layout blows the cam up 2-3x and the game ~1.1x
+# on half the frame, so upscale with lanczos and sharpen lightly (luma only, so compression blocks are not boosted).
+SHARP_CAM = "unsharp=5:5:0.7:5:5:0"
+SHARP_GAME = "unsharp=5:5:0.5:5:5:0"
 
 
 def even(n):
@@ -141,8 +145,8 @@ def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x
             top = f"crop={cw}:{chh}:{even(sw * x)}:{even(sh * y)}"
         gw = even(sw * GAME_H / sh) if sw * GAME_H / sh >= W else W
         gx = game_x if game_x is not None else ((gw - W) if cam_side == 'left' else 0)
-        v = (f"[0:v]split[a][b];[a]{top},scale={W}:{TOP}:force_original_aspect_ratio=increase,crop={W}:{TOP},setsar=1[cam];"
-             f"[b]scale={gw}:{GAME_H},crop={W}:{GAME_H}:{even(gx)}:0,setsar=1[game];[cam][game]vstack[v]")
+        v = (f"[0:v]split[a][b];[a]{top},scale={W}:{TOP}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{TOP},{SHARP_CAM},setsar=1[cam];"
+             f"[b]scale={gw}:{GAME_H}:flags=lanczos,crop={W}:{GAME_H}:{even(gx)}:0,{SHARP_GAME},setsar=1[game];[cam][game]vstack[v]")
         if band:
             y0, bh, secs = band
             en = f":enable='lte(t,{secs})'" if secs > 0 else ''
@@ -275,7 +279,8 @@ def main():
     mp4 = out / f"clip_{a.pick}.mp4"
     run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{s0:.2f}", "-to", f"{e0:.2f}", "-i", c["source"],
          "-filter_complex", v, "-map", "[vo]", "-map", "0:a?", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-         "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+         # near-lossless: this file is only an intermediate, the posts app (hook.finish) encodes the final once more
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "12", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
          "-ar", "48000", "-movflags", "+faststart", str(mp4)])
     info = c.get("info", {})
     save_json(out / f"clip_{a.pick}.json", {"file": str(mp4), "start": s0, "end": e0, "layout": layout, "hook": a.hook or a.title, "title": a.title, "cam": cam,

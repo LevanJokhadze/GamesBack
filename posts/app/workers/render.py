@@ -57,6 +57,9 @@ def run():
     return False
 
 
+SOURCE_FORMAT = "b[format_id!^=portrait][height<=1080]/b[height<=1080]/b"
+
+
 class Skip(Exception):
     pass
 
@@ -67,8 +70,11 @@ def build(c: dict, m: dict, work: Path) -> dict:
     (work / "src").mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CLIP_DESK_HOME=str(work))
     src = work / "src" / "clip.mp4"
-    sh([sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-f", "best[height<=1080]", "-o", str(src), m["url"]],
-       timeout=600)
+    # the landscape 1080p rendition (Twitch also lists "portrait-*" crops, which the react layout must not get),
+    # highest resolution and frame rate first
+    sh([sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1080,fps", "-f", SOURCE_FORMAT,
+        "-o", str(src), m["url"]], timeout=600)
+    src_res = hook.resolution(src)
     sh([sys.executable, str(config.VENDOR / "moments.py"), str(src), "--top", "1", "--min", "5", "--max", "60"],
        cwd=work, env=env)
     job = next((work / "jobs").iterdir())
@@ -110,6 +116,7 @@ def build(c: dict, m: dict, work: Path) -> dict:
                 overlay=ov, overlay_width=c["overlay_width"] or 600, overlay_y=c["overlay_y"] or 895,
                 punch=c.get("punch_zoom") is not False)
     dur = round(hook.duration(final), 2)
+    plan = {**plan, "source": f"{src_res[0]}x{src_res[1]}"}
     return {"final": final, "duration": dur, "title": title, "texts": t, "plan": plan, "candidates": cands}
 
 
@@ -119,6 +126,8 @@ def render_one(c: dict, m: dict) -> int:
     try:
         b = build(c, m, work)
         final, dur, title, t, plan, cands = b["final"], b["duration"], b["title"], b["texts"], b["plan"], b["candidates"]
+        if int(plan["source"].split("x")[1]) < 720:
+            db.log("render", f"{m['external_id']}: Twitch only gave a {plan['source']} source, the clip will look soft", "warn")
         thumb = work / "thumb.jpg"
         sh(["ffmpeg", "-v", "error", "-y", "-ss", "1.5", "-i", str(final), "-frames:v", "1", "-vf", "scale=540:-2", str(thumb)])
         slug = re.sub(r"[^a-z0-9]+", "-", (m["channel"] or "clip").lower())

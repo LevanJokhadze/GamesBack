@@ -22,6 +22,11 @@ import numpy as np
 W, H = 1080, 1920
 SEAM = 730            # react layout (vendor/gtavi/cut.py TOP): webcam above, gameplay below
 FPS = 30
+# The final, uploaded file. TikTok / Reels / Shorts re-encode whatever they get, so start from a high bitrate:
+# CRF 17 on the slow preset (~10-15 Mbps for 1080x1920), capped at 20 Mbps; aq-mode 3 keeps dark scenes
+# (night driving, interiors) from turning into blocks.
+ENCODE = ["-c:v", "libx264", "-preset", "slow", "-crf", "17", "-profile:v", "high", "-level", "4.2",
+          "-maxrate", "20M", "-bufsize", "40M", "-x264-params", "aq-mode=3"]
 HYPE = re.compile(r"\b(no+|no way|oh my god|omg|what|wait|bro|let'?s go+|holy|insane|crazy|yo+|wtf|dude|look|nah|run|"
                   r"go+|dead|help|stop|why|how|hey|oh+|ah+|yes+|wow)\b", re.I)
 STEP = 0.1            # analysis resolution in seconds
@@ -273,9 +278,13 @@ def finish(cut: Path, out: Path, p: dict, hook_text: str, layout: str = "react",
         f += ["[0:a]anull[an]"]
         a = "[an]"
     _sh(["ffmpeg", "-v", "error", "-y", *inputs, "-filter_complex", ";".join(f), "-map", v, "-map", a,
-         "-r", str(FPS), "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+         "-r", str(FPS), *ENCODE, "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart", str(out)])
     return out
+
+
+def resolution(path: Path) -> tuple[int, int]:
+    return png_size(path)
 
 
 def duration(path: Path) -> float:
