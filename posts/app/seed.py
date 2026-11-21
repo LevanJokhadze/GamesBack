@@ -159,3 +159,45 @@ def whole_frame_layout():
     db.q("UPDATE campaigns SET layout='blur'")
     db.set_setting(LAYOUT_KEY, True)
     db.log("seed", "all campaigns now use the whole-frame layout (sharper than the zoomed react layout)")
+
+
+# --- 21 Nov 2026: joined Bobby's campaign; its rules brief requires #bobbyvanriper AND twitch.tv/bobby_vanriper ---
+BOBBY_CAPTION_KEY = "bobby_caption_link_2026_11_21"
+BOBBY_LINK = "twitch.tv/bobby_vanriper"
+BOBBY_CAPTION = "{hook} Follow Bobby VanRiper live at twitch.tv/bobby_vanriper #bobbyvanriper #gta6 #gtavi #twitchclips"
+BOBBY_BRIEF = """Clipping Nation rules brief (Notion "Bobby Van Riper GTA VI Clipping: Requirements & Guide", read 21 Nov 2026):
+- Only Bobby's GTA VI streams and videos. TikTok, Instagram Reels and YouTube Shorts; cross-posting encouraged.
+- Caption: #bobbyvanriper AND twitch.tv/bobby_vanriper (in the caption or on screen). English only.
+- Structure: hook in the first 2 s, one clear moment, CTA naming Bobby and where to watch him live.
+- Captions readable without sound. Overlay optional (Google Drive folder in the brief).
+- Likes visible; at least 1% engagement; each clip stays live 30 days; no near-identical clip more than 5 times.
+- Submit each link within 30 min of posting.
+- Payout: $1.50 per 1K views, min 1,500 views ($2.25), max $150. Clipping Nation Discord is required for payouts;
+  at 1,500 views open a "Submit Demographics" ticket with a screen recording of the country breakdown (40% Tier 1)."""
+
+
+def bobby_caption():
+    """Once: Bobby's campaign caption gets the required twitch.tv link (only if it doesn't have it already) and the
+    brief's rules; captions of Bobby clips not yet sent to Buffer get the link too. Scheduled posts keep the text
+    Buffer already has."""
+    if db.settings().get(BOBBY_CAPTION_KEY):
+        return
+    from . import captions
+    for ca in db.q("SELECT id, caption_template FROM campaigns WHERE 'bobby_vanriper' = ANY(channels)"):
+        if BOBBY_LINK not in (ca["caption_template"] or "").lower():
+            db.q("UPDATE campaigns SET caption_template=%s, rules=%s WHERE id=%s", (BOBBY_CAPTION, BOBBY_BRIEF, ca["id"]))
+        else:
+            db.q("UPDATE campaigns SET rules=%s WHERE id=%s", (BOBBY_BRIEF, ca["id"]))
+        for c in db.q("""SELECT id, caption FROM clips WHERE campaign_id=%s AND status IN ('review','approved')
+                           AND caption IS NOT NULL""", (ca["id"],)):
+            text = c["caption"]
+            if BOBBY_LINK in text.lower():
+                continue
+            text = text.replace("Watch Bobby VanRiper live on Twitch!", "Follow Bobby VanRiper live at " + BOBBY_LINK)
+            if BOBBY_LINK not in text.lower():
+                text = text + " " + BOBBY_LINK
+            if "#bobbyvanriper" not in text.lower():
+                text = text + " #bobbyvanriper"
+            db.q("UPDATE clips SET caption=%s WHERE id=%s", (captions.clean(text), c["id"]))
+    db.set_setting(BOBBY_CAPTION_KEY, True)
+    db.log("seed", "Bobby VanRiper caption now includes twitch.tv/bobby_vanriper and #bobbyvanriper (required by his brief)")
