@@ -41,6 +41,9 @@ Clip rendering uses scripts vendored from [gtavi-claudecode](https://github.com/
 | `SUBMIT_AGENT_TOKEN` | Optional. Long random string for the `agent` submit method: the helper sends `Authorization: Bearer <token>` to `GET /api/agent/submissions` and reports each job with `POST /api/agent/submissions/{id}` `{"ok": true}` or `{"ok": false, "error": "..."}`. |
 | `WITH_BROWSER` | Build-time, default `1`: installs headless Chromium (Playwright) for the `browser` submit method. |
 | `RUN_WORKERS` | `1` (default) runs the workers in this process; `0` serves the API only. |
+| `GEMINI_API_KEY` | Jarvis voice assistant (Gemini Live). A Gemini API key, the same one the Personal Dashboard uses. |
+| `GOOGLE_CLOUD_PROJECT`, `GOOGLE_CREDENTIALS_JSON`, `GOOGLE_CLOUD_LOCATION` | Jarvis through Vertex AI instead of an API key (service account key as JSON or base64; location default `eu`). Same values as the Personal Dashboard. |
+| `GEMINI_LIVE_MODEL`, `GEMINI_VOICE` | Optional: default `gemini-3.8-live`; a prebuilt voice name. |
 
 ## Accounts
 
@@ -48,6 +51,21 @@ Clip rendering uses scripts vendored from [gtavi-claudecode](https://github.com/
 handle, login, password (encrypted with `ACCOUNTS_KEY`, returned only by `POST /api/accounts/{id}/reveal`, which is logged),
 status, the streamers it targets, notes and stats. An account linked to a Buffer channel takes views, posts and likes from
 the pipeline's posts on that channel; followers and the stats of unlinked accounts are typed in.
+
+## Jarvis (voice assistant)
+
+`app/assistant.py` builds the live snapshot Jarvis knows (active campaigns and rules, every account with geo, status,
+upload mode, streamers, video count, views and 0-view videos, the next 60 h of the calendar, pending Content Rewards
+submissions, the review queue, failing workers) and the cards the dashboard opens when a session starts
+(`GET /api/assistant/context`). A 0-view video is diagnosed: too early, not tracked (hand upload, or the Buffer key has no
+insights permission), not synced yet, or a real zero with what to fix.
+
+`app/assistant_live.py` relays the dashboard's WebSocket (`/api/assistant/live`, one-use ticket from
+`POST /api/assistant/session`) to Gemini Live, the same way the Personal Dashboard's work mode does, so credentials stay on
+the server. Gemini's tools: reads (snapshot, calendar, details, event log), `run_worker`, changes that need a spoken yes
+first (`mark_submitted`, `add_post_link`, `approve_clip`, `reject_clip`, `set_account_status`, refused unless
+`confirmed=true`), and screen tools sent to the browser (cards, modals, page changes, opening Instagram/TikTok/YouTube
+links and upload pages). Every action is written to the event log as `assistant`.
 
 ## Run locally
 
