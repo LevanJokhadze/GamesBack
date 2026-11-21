@@ -93,3 +93,29 @@ def test_a_geo_has_its_own_daily_limits():
     assert publish.day_cap("tiktok", s) == 2 and publish.day_cap("youtube", s, "US") == 1
     s["geo_slots"]["RU"]["per_day"] = {"default": 3, "youtube": "x"}
     assert publish.day_cap("tiktok", s, "RU") == 3 and publish.day_cap("youtube", s, "RU") == 1
+
+
+def test_nudity_check_verdicts(monkeypatch, tmp_path):
+    from app import config
+    from app.integrations import safety
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(b"x")
+    monkeypatch.setattr(config, "NUDITY_CHECK", True)
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "")
+    assert safety.check(src)["verdict"] == "unsure"          # no key: a person looks, nothing is auto-approved
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "k")
+    monkeypatch.setattr(safety, "frames", lambda src: [(0.0, b"jpg"), (1.0, b"jpg")])
+    monkeypatch.setattr(safety, "_ask", lambda shots: {"verdict": "Nudity", "at": [1, "x"], "what": "a naked character"})
+    assert safety.check(src) == {"verdict": "nudity", "what": "a naked character", "at": [1]}
+    monkeypatch.setattr(safety, "_ask", lambda shots: {"verdict": "revealing", "at": [], "what": "bikini"})
+    assert safety.check(src)["verdict"] == "revealing"
+    monkeypatch.setattr(safety, "_ask", lambda shots: {"verdict": "maybe"})
+    assert safety.check(src)["verdict"] == "unsure"
+
+    def refused(shots):
+        raise RuntimeError("the model declined to look at the frames")
+    monkeypatch.setattr(safety, "_ask", refused)
+    out = safety.check(src)
+    assert out["verdict"] == "unsure" and "declined" in out["what"]
+    monkeypatch.setattr(config, "NUDITY_CHECK", False)
+    assert safety.check(src)["verdict"] == "off"
