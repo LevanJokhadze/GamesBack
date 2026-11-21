@@ -16,12 +16,15 @@ def gql(query: str, variables: dict) -> dict:
         return json.load(r)
 
 
-def top_clips(login: str, period: str = "LAST_WEEK") -> list[dict]:
-    """period: LAST_DAY | LAST_WEEK | LAST_MONTH | ALL_TIME."""
+def top_clips(login: str, period: str = "LAST_WEEK", fallback: bool = True) -> list[dict]:
+    """period: LAST_DAY | LAST_WEEK | LAST_MONTH | ALL_TIME. With fallback off, a GQL answer without data gives []
+    instead of the slow yt-dlp listing (which only knows the last 7 days)."""
     data = gql(CLIPS, {"login": login, "period": period})
     user = (data.get("data") or {}).get("user")
     clips = (user or {}).get("clips")
     if not clips:
+        if not fallback:
+            return []
         return ytdlp_clips(login, f"twitch GQL gave no clips ({str(data.get('errors') or data)[:300]})")
     out = []
     for e in clips.get("edges") or []:

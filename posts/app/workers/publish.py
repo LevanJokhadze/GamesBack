@@ -34,7 +34,15 @@ def zone_label(tz: ZoneInfo) -> str:
     return "US Eastern" if tz.key == "America/New_York" else tz.key.split("/")[-1].replace("_", " ")
 
 
-def day_cap(service: str, s: dict) -> int:
+def day_cap(service: str, s: dict, geo: str | None = None) -> int:
+    """Posts a day for one account. A geo's own "per_day" in geo_slots (by platform, or "default") wins."""
+    own = ((s.get("geo_slots") or {}).get((geo or "").upper()) or {}).get("per_day") or {}
+    try:
+        n = int(own.get(service) or own.get("default") or 0)
+    except (TypeError, ValueError, AttributeError):
+        n = 0
+    if n > 0:
+        return n
     caps = s.get("max_per_day_by_service") or {}
     return int(caps.get(service) or s.get("max_posts_per_day") or 3)
 
@@ -50,7 +58,7 @@ def next_slot(channel_id: str, service: str, s: dict, after: datetime, geo: str 
     tz, slots = slot_plan(s, geo)
     taken = [r["due_at"] for r in db.q("""SELECT due_at FROM posts WHERE channel_id=%s AND status <> 'deleted'
                                           AND due_at > now() - interval '2 days'""", (channel_id,))]
-    cap = day_cap(service, s)
+    cap = day_cap(service, s, geo)
     gap = min_gap(s)
     btz = ZoneInfo(s.get("buffer_timezone") or "Asia/Tbilisi")
     day = after.astimezone(tz).date()
