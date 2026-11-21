@@ -213,6 +213,31 @@ ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS banner_width INT DEFAULT 1000;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS banner_key TEXT;
 ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS bottom_urls TEXT[] NOT NULL DEFAULT '{}';
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS banners BOOLEAN NOT NULL DEFAULT FALSE;
+-- banner_width 0 = fit the banner's artwork to the clip's width (app/banner.py fit_width)
+ALTER TABLE campaigns ALTER COLUMN banner_width SET DEFAULT 0;
+-- the split layout's bottom: 'race' (a ball race drawn for each clip), 'mix', or one loop (app/loops.py)
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS bottom_kind TEXT NOT NULL DEFAULT 'race';
+-- trends worker (app/workers/trends.py): hashtags whose most-viewed Shorts/Reels we re-cut as split screens
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS trend_tags TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS trend_min_views INT NOT NULL DEFAULT 50000;
+CREATE TABLE IF NOT EXISTS trend_videos (
+  id SERIAL PRIMARY KEY,
+  campaign_id INT REFERENCES campaigns(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL,
+  video_id TEXT NOT NULL,
+  url TEXT,
+  title TEXT,
+  channel TEXT,
+  tag TEXT,
+  views BIGINT,
+  duration REAL,
+  published_at TIMESTAMPTZ,
+  verdict TEXT,
+  reason TEXT,
+  moment_id INT REFERENCES moments(id) ON DELETE SET NULL,
+  checked_at TIMESTAMPTZ DEFAULT now(),
+  UNIQUE (campaign_id, platform, video_id)
+);
 """
 
 # Geos created on first start (names only, no account data)

@@ -51,6 +51,41 @@ def key_colour(path: Path, at: float = 0.5) -> str:
     return f"0x{r:02X}{g:02X}{b:02X}"
 
 
+def content_box(path: Path, key: str = "", alpha: bool = False, dur: float = 0) -> tuple[float, float, float, float]:
+    """Where the banner's artwork is, as fractions (x0, y0, x1, y1) of its frame: the union over a few frames of the
+    pixels that are not the key colour (or, for a file with alpha, not transparent). The whole frame if none."""
+    sw, sh = 480, 270
+    x0, y0, x1, y1 = 1.0, 1.0, 0.0, 0.0
+    kc = int(key[2:], 16) if key.startswith("0x") else 0x00FF00
+    kr, kg, kb = kc >> 16, (kc >> 8) & 255, kc & 255
+    for t in [dur * f for f in (0.15, 0.35, 0.55, 0.75, 0.92)] if dur else [0.5]:
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.2f}", "-i", str(path), "-frames:v", "1",
+                              "-vf", f"scale={sw}:{sh}", "-f", "rawvideo", "-pix_fmt", "rgba", "-"],
+                             capture_output=True, timeout=120).stdout
+        if len(raw) < sw * sh * 4:
+            continue
+        import numpy as np
+        a = np.frombuffer(raw, np.uint8).reshape(sh, sw, 4).astype(np.int16)
+        if alpha:
+            on = a[:, :, 3] > 40
+        else:
+            on = (abs(a[:, :, 0] - kr) + abs(a[:, :, 1] - kg) + abs(a[:, :, 2] - kb)) > 70
+        ys, xs = np.nonzero(on)
+        if len(xs) < 50:
+            continue
+        x0, x1 = min(x0, xs.min() / sw), max(x1, (xs.max() + 1) / sw)
+        y0, y1 = min(y0, ys.min() / sh), max(y1, (ys.max() + 1) / sh)
+    return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else (0.0, 0.0, 1.0, 1.0)
+
+
+def fit_width(box: tuple[float, float, float, float], bw: int, bh: int) -> int:
+    """The banner width (px, may be wider than the clip) at which its artwork is 96 % of the clip's width, but at
+    most 60 % of its height: big enough for the sponsor's 30 %-of-the-screen rule."""
+    cw, ch = (box[2] - box[0]) * bw, (box[3] - box[1]) * bh
+    scale = min(W * 0.96 / max(cw, 1), H * 0.6 / max(ch, 1))
+    return int(bw * scale) // 2 * 2
+
+
 def times(dur: float, payoff: float | None, banner_secs: float) -> list[float]:
     """Where the banners go, in the clip's own time (before any banner is added)."""
     if dur < EARLIEST:
@@ -69,7 +104,8 @@ def times(dur: float, payoff: float | None, banner_secs: float) -> list[float]:
 
 def insert(video: Path, banner: Path, out: Path, at: list[float], width: int = 1000, key: str = "") -> dict:
     """Write `video` with `banner` inserted (freeze + banner) at each time in `at`. key: '' = auto (alpha if the file
-    has it, else the corner colour), 'none' = no keying, or a colour like 0x00FF00. Returns what was done."""
+    has it, else the corner colour), 'none' = no keying, or a colour like 0x00FF00. width: the banner's width in px
+    (centred, may overflow the frame), 0 = fit its artwork to the clip's width. Returns what was done."""
     work = out.parent
     v, b = probe(video), probe(banner)
     bd = round(b["duration"], 3)
@@ -80,7 +116,10 @@ def insert(video: Path, banner: Path, out: Path, at: list[float], width: int = 1
     else:
         colour = key if key and key not in ("auto",) else key_colour(banner)
         keyf, how = f"chromakey=color={colour}:similarity=0.16:blend=0.08,despill=type=green,format=yuva420p", colour
-    width = max(int(W * 0.5), min(int(width or 1000), W))
+    if not width or int(width) <= 0:
+        box = content_box(banner, how, alpha=how == "alpha", dur=bd) if how != "none" else (0.0, 0.0, 1.0, 1.0)
+        width = fit_width(box, b["width"] or W, b["height"] or W * 9 // 16)
+    width = max(int(W * 0.5), min(int(width), W * 3)) // 2 * 2
     at = sorted(t for t in at if 0 < t < v["duration"])
     inputs, f, parts = [], [], []
     edges = [0.0] + at + [v["duration"]]

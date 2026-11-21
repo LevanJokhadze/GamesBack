@@ -18,6 +18,10 @@ BLOB_READ_WRITE_TOKEN = env("BLOB_READ_WRITE_TOKEN")
 # Optional: a YouTube Data API v3 key (Google Cloud console). Reads public view/like/comment counts of our Shorts,
 # since Buffer's post metrics may not cover YouTube. Free: 1 quota unit per 50 videos, 10,000 units a day.
 YOUTUBE_API_KEY = env("YOUTUBE_API_KEY")
+# optional: Instagram Reels for the trends worker, through Apify's Instagram Hashtag Scraper (apify.com, API token)
+APIFY_TOKEN = env("APIFY_TOKEN")
+# optional: YouTube cookies (Netscape cookies.txt text) for yt-dlp, when YouTube asks the server to sign in
+YTDLP_COOKIES = env("YTDLP_COOKIES")
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
 TITLE_MODEL = env("TITLE_MODEL", "claude-haiku-5-5")
 # Look at each source clip for nudity before cutting it (integrations/safety.py). NUDITY_CHECK=0 turns it off.

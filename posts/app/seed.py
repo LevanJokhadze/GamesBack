@@ -340,3 +340,19 @@ def bigballs_campaign():
     db.set_setting(key, True)
     db.log("seed", "added the BigBalls banner campaign (off until its banner is uploaded) and moved Evelone and Strogo "
                    "to the split-screen layout")
+
+
+def bigballs_trends():
+    """Once: the BigBalls campaign also re-cuts the most-viewed Shorts of CS2 streamers that nobody split-screened
+    yet (app/workers/trends.py), its banner is fitted to the clip's width (the artwork fills ~1040 px, 30 %+ of the
+    screen), and its bottom video is the ball race."""
+    key = "bigballs_trends_2026_11_22"
+    if db.settings().get(key):
+        return
+    db.q("""UPDATE campaigns SET trend_tags=%s, trend_min_views=50000, banner_width=0, bottom_kind='race'
+            WHERE url='https://t.me/Bigballs_tiktok_bot'""",
+         (["evelone", "buster", "strogo", "s1mple", "donk", "monesy"],))
+    db.q("UPDATE campaigns SET banner_width=0 WHERE banner_width=1000")
+    db.set_setting(key, True)
+    db.log("seed", "BigBalls: trend tags evelone, buster, strogo, s1mple, donk, monesy; banner fitted to the clip "
+                   "width; ball race under the streamer")

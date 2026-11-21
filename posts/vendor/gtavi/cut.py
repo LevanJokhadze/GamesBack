@@ -127,7 +127,8 @@ def even(n):
     return int(n) // 2 * 2
 
 
-def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x=None, face_expr=None, dur=None):
+def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x=None, face_expr=None, dur=None,
+                 portrait_y=None):
     """Layout + burned-caption filter graph ending in [vo]. Reused by translate.py.
     split: the streamer (webcam crop, else the whole frame on a blurred band) in the top TOP px and input 1 (a muted
     satisfying loop, already looped and seeked by the caller) below it."""
@@ -156,7 +157,10 @@ def video_filter(layout, cam, ass, band=None, cam_side='right', src=None, game_x
     elif layout == 'split':
         bot = (f"[1:v]scale={W}:{GAME_H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{GAME_H},"
                f"fps=30,setsar=1,trim=duration={dur:.3f},setpts=PTS-STARTPTS[bot]")
-        if cam or face_expr:
+        if portrait_y is not None:  # a vertical source (Short/Reel): a full-width window around the streamer's face
+            v = (f"[0:v]scale={W}:-2:flags=lanczos,crop={W}:{TOP}:0:{portrait_y},{SHARP_CAM},fps=30,setsar=1[cam];"
+                 f"{bot};[cam][bot]vstack=shortest=1[v]")
+        elif cam or face_expr:
             if face_expr:
                 cw, chh, ex, ey = face_expr
                 top = f"crop={cw}:{chh}:{ex}:{ey}"
@@ -243,6 +247,21 @@ def main():
     face_expr = None
     if layout == 'split' and not a.bottom:
         sys.exit("split layout needs --bottom")
+    portrait_y = None
+    if layout == 'split':
+        from common import ffprobe as _fp0
+        _v0 = [x for x in _fp0(c['source'])['streams'] if x.get('codec_type') == 'video'][0]
+        if int(_v0['height']) > int(_v0['width']) * 1.2:
+            # a vertical source (a Short or Reel someone else posted): no webcam box to find, keep the face in view
+            from facecam import portrait_crop_y
+            try:
+                portrait_y = portrait_crop_y(c['source'], s0, e0, W, TOP)
+            except Exception as e:
+                print(f"facecam: portrait face search failed ({e}), using the middle")
+            if portrait_y is None:
+                portrait_y = max(0, (W * int(_v0['height']) // int(_v0['width']) - TOP) // 2) // 2 * 2
+            cam = ''
+            print(f"facecam: vertical source, top window at y={portrait_y}")
     if layout == 'split' and cam == 'auto':
         # the streamer's webcam on top when there is one, else the whole stream frame: a split clip is never skipped
         try:
@@ -315,7 +334,8 @@ def main():
         vs = [x for x in ffprobe(c['source'])['streams'] if x.get('codec_type') == 'video'][0]
         src = (int(vs['width']), int(vs['height']))
         gx = game_offset(c['source'], s0, e0, src, [float(t) for t in cam.split(':')])
-    v = video_filter(layout, cam, ass, band=band, cam_side=side, src=src, game_x=gx, face_expr=face_expr, dur=e0 - s0)
+    v = video_filter(layout, cam, ass, band=band, cam_side=side, src=src, game_x=gx, face_expr=face_expr, dur=e0 - s0,
+                     portrait_y=portrait_y)
     mp4 = out / f"clip_{a.pick}.mp4"
     extra = ["-stream_loop", "-1", "-ss", f"{a.bottom_ss:.2f}", "-i", a.bottom] if layout == 'split' else []
     run([tool("ffmpeg"), "-y", "-v", "error", "-ss", f"{s0:.2f}", "-to", f"{e0:.2f}", "-i", c["source"], *extra,

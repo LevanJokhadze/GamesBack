@@ -74,6 +74,23 @@ def detect_faces(frames):
     return out
 
 
+def portrait_crop_y(video, start, end, out_w, out_h):
+    """A vertical source (a Short or Reel) scaled to out_w wide: the y (px, even) of the out_h tall window that keeps
+    the streamer's face about 42 % down it. No stable face: the window around the middle of the frame."""
+    frames = sample_frames(video, start, end, n=10)
+    if not frames:
+        return None
+    h, w = frames[0].shape[:2]
+    full_h = out_w * h / w
+    face, hits = stable_face(detect_faces(frames), len(frames))
+    if face is not None and hits >= max(3, len(frames) // 3):
+        cy = (face[1] + face[3] / 2) / h * full_h
+    else:
+        cy = full_h * 0.5
+    y = min(max(cy - out_h * 0.42, 0), full_h - out_h)
+    return int(y) // 2 * 2
+
+
 def iou(a, b):
     ax2, ay2, bx2, by2 = a[0] + a[2], a[1] + a[3], b[0] + b[2], b[1] + b[3]
     iw = max(0, min(ax2, bx2) - max(a[0], b[0])); ih = max(0, min(ay2, by2) - max(a[1], b[1]))
