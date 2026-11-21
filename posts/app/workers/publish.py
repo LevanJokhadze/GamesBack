@@ -106,7 +106,7 @@ def run():
     # only Buffer posts on the enabled platforms count here: a clip uploaded by hand somewhere still goes out on the rest
     # only clips of active campaigns: an ended campaign's leftover clips would use up the day's few posting slots
     # a geo campaign's clips only while that geo has an automatic Buffer account (else they'd crowd out the rest)
-    clips = db.q("""SELECT c.*, ca.geo AS campaign_geo FROM clips c JOIN campaigns ca ON ca.id = c.campaign_id AND ca.active
+    clips = db.q("""SELECT c.*, ca.geo AS campaign_geo, NULLIF(ca.banner_url, '') IS NOT NULL AS has_banner FROM clips c JOIN campaigns ca ON ca.id = c.campaign_id AND ca.active
                     WHERE c.status IN ('approved','scheduled') AND c.approved_at > now() - interval '4 days'
                     AND (NULLIF(ca.geo, '') IS NULL
                          OR EXISTS (SELECT 1 FROM accounts a JOIN geos g ON g.id = a.geo_id
@@ -125,6 +125,9 @@ def run():
                     and ch["id"] not in manual],
                    key=lambda ch: order.get(ch["service"], 99))
     by_geo, targeted = geo_routes()
+    # sponsor banner clips (BigBalls) only go to the channels of accounts that take them
+    banner_ok = {r["buffer_channel_id"] for r in db.q("""SELECT buffer_channel_id FROM accounts
+                                                        WHERE banners AND buffer_channel_id IS NOT NULL""")}
     stagger = int(s.get("stagger_minutes") or 15)
     n = 0
     # Buffer's free plan holds at most 10 queued posts per channel at a time
@@ -139,8 +142,15 @@ def run():
                                                          JOIN accounts a ON a.id = mu.account_id
                                                          WHERE mu.clip_id=%s AND a.buffer_channel_id IS NOT NULL""",
                                                       (clip["id"],))}
+        # the same Twitch moment cut for another campaign (contest vs banner) is never posted twice to one channel
+        have |= {r["channel_id"] for r in db.q("""SELECT p.channel_id FROM posts p JOIN clips c2 ON c2.id = p.clip_id
+                                                  JOIN moments m2 ON m2.id = c2.moment_id
+                                                  JOIN moments m1 ON m1.id = %s
+                                                  WHERE p.status <> 'deleted' AND m2.external_id = m1.external_id""",
+                                               (clip["moment_id"],))} if clip.get("moment_id") else set()
         missing = [ch for ch in chans if ch["id"] not in have and f"{clip['id']}:{ch['id']}" not in refused
-                   and queued.get(ch["id"], 0) < cap_q and geo_ok(clip["campaign_geo"], by_geo.get(ch["id"]), targeted)]
+                   and queued.get(ch["id"], 0) < cap_q and geo_ok(clip["campaign_geo"], by_geo.get(ch["id"]), targeted)
+                   and (not clip.get("has_banner") or ch["id"] in banner_ok)]
         if not missing:
             continue
         earliest = datetime.now(timezone.utc) + timedelta(minutes=20)

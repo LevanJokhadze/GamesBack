@@ -19,7 +19,7 @@ PLATFORMS = ("instagram", "tiktok", "youtube")
 STATUSES = ("warming", "active", "paused", "banned", "retired")
 COLS = ("id, geo_id, platform, handle, login, profile_url, status, streamers, buffer_channel_id, followers, total_views, "
         "total_posts, total_likes, stats_at, notes, created_at, updated_at, upload_mode, manual_since, week_hint_at, "
-        "password_enc IS NOT NULL AS has_password")
+        "banners, password_enc IS NOT NULL AS has_password")
 MODES = ("manual", "automatic")
 
 
@@ -176,6 +176,8 @@ class AccountIn(BaseModel):
     notes: str | None = None
     # None = keep (new accounts start manual)
     upload_mode: str | None = None
+    # takes clips of sponsor banner campaigns (BigBalls); off by default so a banner never lands on an account by accident
+    banners: bool = False
 
 
 def _clean(body: AccountIn) -> dict:
@@ -197,7 +199,7 @@ def _clean(body: AccountIn) -> dict:
             "login": blank(body.login), "profile_url": blank(body.profile_url), "status": body.status,
             "streamers": streamers, "buffer_channel_id": blank(body.buffer_channel_id), "followers": body.followers,
             "total_views": body.total_views, "total_posts": body.total_posts, "total_likes": body.total_likes,
-            "notes": blank(body.notes)}
+            "notes": blank(body.notes), "banners": bool(body.banners)}
 
 
 def _stats_changed(old: dict | None, new: dict) -> bool:

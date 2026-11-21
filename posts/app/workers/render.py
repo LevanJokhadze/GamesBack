@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .. import captions, config, db, hook
+from .. import banner, captions, config, db, hook, loops
 from ..integrations import blob, safety, titles
 
 ET = ZoneInfo("America/New_York")
@@ -129,6 +129,9 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
            "--end", f"{plan['end']:.2f}", "--layout", c.get("layout") or "react", "--captions", c["captions"] or "word"]
     if c["cam_box"]:
         cmd += ["--cam", c["cam_box"]]
+    if (c.get("layout") or "react") == "split":
+        # the satisfying loop under the streamer: chosen by the moment, so a re-render keeps the same one
+        cmd += ["--bottom", str(loops.pick(c, int(m.get("id") or 0))), "--bottom-ss", f"{(int(m.get('id') or 0) * 7) % 30}"]
     r = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=1800)
     out = (r.stdout or "") + (r.stderr or "")
     if "skipped:" in out:
@@ -146,9 +149,31 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     hook.finish(cut, final, plan, t.get("screen") or "", layout=layout, hook_secs=c["title_secs"] or 5,
                 overlay=ov, overlay_width=c["overlay_width"] or 600, overlay_y=c["overlay_y"] or 895,
                 punch=c.get("punch_zoom") is not False)
+    if c.get("banner_url"):
+        # the sponsor banner (e.g. BigBalls): freeze + banner about 1 s before the payoff, never before 0:10
+        bn = banner_file(c["banner_url"])
+        payoff = (plan["main_at"] + plan["peak"]) if plan.get("teaser") else plan.get("peak")
+        at = banner.times(hook.duration(final), payoff, banner.probe(bn)["duration"])
+        with_banner = work / "final_banner.mp4"
+        plan = {**plan, "banner": banner.insert(final, bn, with_banner, at, width=c.get("banner_width") or 1000,
+                                                key=c.get("banner_key") or "")}
+        final = with_banner
     dur = round(hook.duration(final), 2)
-    plan = {**plan, "source": f"{src_res[0]}x{src_res[1]}"}
+    plan = {**plan, "source": f"{src_res[0]}x{src_res[1]}", "layout": layout}
     return {"final": final, "duration": dur, "title": title, "texts": t, "plan": plan, "candidates": cands}
+
+
+def banner_file(url: str) -> Path:
+    """The campaign's banner, downloaded once per container (they are 15-40 MB)."""
+    import hashlib
+    ext = Path(url.split("?")[0]).suffix.lower() if Path(url.split("?")[0]).suffix.lower() in (".mp4", ".mov", ".webm") else ".mp4"
+    f = config.WORK_DIR / "banners" / f"{hashlib.sha1(url.encode()).hexdigest()[:16]}{ext}"
+    if not f.exists():
+        f.parent.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_name(f.name + ".part")
+        sh([sys.executable, "-c", "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])", url, str(tmp)])
+        tmp.replace(f)
+    return f
 
 
 def render_one(c: dict, m: dict) -> int:
@@ -175,6 +200,11 @@ def render_one(c: dict, m: dict) -> int:
         caption = captions.clean(c["caption_template"].replace("{hook}", t["hook"] or title))
         # a new campaign's first clip always waits for review, so its layout, overlay and caption are checked once
         first = not db.one("SELECT 1 AS x FROM clips WHERE campaign_id=%s AND approved_at IS NOT NULL LIMIT 1", (c["id"],))
+        # the same for a campaign's first split-screen or banner clip: a new look is checked once before it goes out
+        if plan.get("layout") == "split" or plan.get("banner"):
+            first = first or not db.one("""SELECT 1 AS x FROM clips WHERE campaign_id=%s AND approved_at IS NOT NULL
+                                           AND edit_plan->>'layout' = %s AND (edit_plan ? 'banner') = %s LIMIT 1""",
+                                        (c["id"], plan.get("layout"), bool(plan.get("banner"))))
         auto = db.settings().get("auto_approve") and not t.get("needs_review") and not first
         row = db.one("""INSERT INTO clips(moment_id, campaign_id, title, caption, video_url, thumb_url, duration, status,
                           approved_at, hook_text, edit_plan)

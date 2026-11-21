@@ -3,7 +3,7 @@ import threading
 import time
 from collections import defaultdict
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -35,6 +35,7 @@ def startup():
     seed.boeshi_campaign()
     seed.retry_oom_renders()
     seed.russian_campaigns()
+    seed.bigballs_campaign()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)
@@ -228,7 +229,7 @@ CAMPAIGN_FIELDS = ["name", "url", "cpm", "min_payout", "max_payout", "channels",
                    "overlay_width", "overlay_y", "captions", "cam_box", "title_secs", "daily_quota", "min_clip_views",
                    "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes",
                    "streamer_name", "ended_at", "end_reason", "target_secs", "teaser", "punch_zoom", "layout",
-                   "language", "geo", "title_template"]
+                   "language", "geo", "title_template", "banner_url", "banner_width", "banner_key", "bottom_urls"]
 
 
 @app.get("/api/campaigns", dependencies=[A])
@@ -252,6 +253,42 @@ def update_campaign(cid: int, body: dict):
     if data:
         db.q(f"UPDATE campaigns SET {', '.join(f'{k}=%s' for k in data)} WHERE id=%s", list(data.values()) + [cid])
     return {"ok": True}
+
+
+VIDEO_TYPES = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm"}
+
+
+@app.put("/api/campaigns/{cid}/upload", dependencies=[A])
+async def upload_campaign_video(cid: int, request: Request, kind: str = "banner", name: str = "video.mp4"):
+    """The dashboard sends a banner (kind=banner, replaces it) or a bottom video for the split layout (kind=bottom,
+    added to the list) as the raw request body. It goes to Blob, and its public URL onto the campaign."""
+    import re
+    import tempfile
+    from pathlib import Path
+    from .integrations import blob
+    if kind not in ("banner", "bottom"):
+        raise HTTPException(400, "kind must be banner or bottom")
+    if not db.one("SELECT 1 AS x FROM campaigns WHERE id=%s", (cid,)):
+        raise HTTPException(404, "campaign not found")
+    ext = Path(name).suffix.lower()
+    if ext not in VIDEO_TYPES:
+        raise HTTPException(400, "send an .mp4, .mov or .webm file")
+    data = await request.body()
+    if not data or len(data) > 200 * 1024 * 1024:
+        raise HTTPException(400, "the file is empty or over 200 MB")
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as f:
+        f.write(data)
+    try:
+        safe = re.sub(r"[^a-z0-9.-]+", "-", Path(name).stem.lower())[:40] or kind
+        url = blob.upload(Path(f.name), f"{kind}s/c{cid}-{safe}{ext}", VIDEO_TYPES[ext])
+    finally:
+        Path(f.name).unlink(missing_ok=True)
+    if kind == "banner":
+        db.q("UPDATE campaigns SET banner_url=%s WHERE id=%s", (url, cid))
+    else:
+        db.q("UPDATE campaigns SET bottom_urls = array_append(bottom_urls, %s) WHERE id=%s", (url, cid))
+    db.log("campaigns", f"campaign #{cid}: {kind} video uploaded ({len(data) // 1024 // 1024} MB)")
+    return {"url": url}
 
 
 @app.get("/api/settings", dependencies=[A])

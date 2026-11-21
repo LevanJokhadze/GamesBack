@@ -75,6 +75,12 @@ def pick_clip(account: dict, exclude: list[int] | None = None) -> dict | None:
                           AND p.channel_id IN (%(ch)s, %(mch)s))
           AND (cardinality(%(st)s::text[]) = 0
                OR EXISTS (SELECT 1 FROM unnest(ca.channels) x WHERE lower(x) = ANY(%(st)s::text[])))
+          -- the same Twitch moment cut for two campaigns (a contest and a banner one) goes to an account only once
+          AND NOT EXISTS (SELECT 1 FROM manual_uploads mu JOIN clips c2 ON c2.id = mu.clip_id
+                          JOIN moments m2 ON m2.id = c2.moment_id JOIN moments m1 ON m1.id = c.moment_id
+                          WHERE mu.account_id = %(a)s AND m2.external_id = m1.external_id)
+          -- a sponsor banner campaign (BigBalls) only goes to accounts that take banner clips
+          AND (NULLIF(ca.banner_url, '') IS NULL OR %(bn)s)
           -- a campaign for a geo (e.g. RU) goes only to that geo's accounts; one without a geo goes to the rest
           AND CASE WHEN NULLIF(ca.geo, '') IS NOT NULL
                    THEN upper(ca.geo) = (SELECT upper(code) FROM geos WHERE id = %(g)s)
@@ -87,7 +93,7 @@ def pick_clip(account: dict, exclude: list[int] | None = None) -> dict | None:
           c.approved_at DESC
         LIMIT 1""", {"a": account["id"], "ch": account.get("buffer_channel_id") or "", "mch": f"manual:{account['id']}",
                      "st": streamers, "pf": account["platform"], "ex": list(exclude or []),
-                     "g": account.get("geo_id")})
+                     "g": account.get("geo_id"), "bn": bool(account.get("banners"))})
 
 
 def send_one(account: dict, slot: datetime) -> dict | None:

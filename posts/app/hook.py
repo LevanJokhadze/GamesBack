@@ -177,7 +177,7 @@ def hook_y(lines: int, layout: str, overlay: tuple[int, int] | None) -> int:
     band = lines * LINE_H + 40
     # react: on the webcam/gameplay seam; blur: in the blurred band just above the full stream frame
     # (cut.py puts the 1080x608 frame at y 576-1184); other layouts: upper third
-    y = SEAM if layout == "react" else (556 - band / 2) if layout == "blur" else 560
+    y = SEAM if layout in ("react", "split") else (556 - band / 2) if layout == "blur" else 560
     if overlay:
         oy, oh = overlay
         lo, hi = y - band / 2, y + band / 2
@@ -269,6 +269,9 @@ def finish(cut: Path, out: Path, p: dict, hook_text: str, layout: str = "react",
         if layout == "react":
             f += [f"{v}split=2[z1][z2]", f"[z1]crop={W}:{SEAM}:0:0[cam]",
                   f"[z2]crop={W}:{H - SEAM}:0:{SEAM},{zp}:s={W}x{H - SEAM},setsar=1[game]", "[cam][game]vstack[vz]"]
+        elif layout == "split":  # zoom the streamer, never the satisfying loop below
+            f += [f"{v}split=2[z1][z2]", f"[z1]crop={W}:{SEAM}:0:0,{zp}:s={W}x{SEAM},setsar=1[cam]",
+                  f"[z2]crop={W}:{H - SEAM}:0:{SEAM}[game]", "[cam][game]vstack[vz]"]
         else:
             f += [f"{v}{zp}:s={W}x{H},setsar=1[vz]"]
         v = "[vz]"
