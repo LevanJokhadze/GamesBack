@@ -34,6 +34,7 @@ def startup():
     seed.diego_campaign()
     seed.boeshi_campaign()
     seed.retry_oom_renders()
+    seed.russian_campaigns()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)
@@ -226,7 +227,8 @@ def retry_moment(moment_id: int):
 CAMPAIGN_FIELDS = ["name", "url", "cpm", "min_payout", "max_payout", "channels", "game", "caption_template", "overlay_url",
                    "overlay_width", "overlay_y", "captions", "cam_box", "title_secs", "daily_quota", "min_clip_views",
                    "lookback_hours", "rules", "active", "whop_bounty_id", "submit_url", "submit_window_minutes",
-                   "streamer_name", "ended_at", "end_reason", "target_secs", "teaser", "punch_zoom", "layout"]
+                   "streamer_name", "ended_at", "end_reason", "target_secs", "teaser", "punch_zoom", "layout",
+                   "language", "geo", "title_template"]
 
 
 @app.get("/api/campaigns", dependencies=[A])

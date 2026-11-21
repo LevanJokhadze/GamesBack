@@ -37,6 +37,33 @@ Return only JSON: {{"payoff": "A", "screen": "...", "title": "...", "hook": "...
 - If the transcript and clip title don't make clear what happens, return {{"payoff": "", "screen": "", "title": "", "hook": ""}}."""
 
 
+PROMPT_RU = """You edit short vertical clips of a Russian-speaking streamer's Twitch stream for YouTube Shorts and
+TikTok, for a Russian-speaking audience. Viewers decide in the first 1-2 seconds whether to keep watching, so each
+clip opens with a 2-second teaser of its payoff (the funniest or most intense moment) and a big text hook on screen,
+then plays from the setup. Everything must be accurate to what happens in the clip; no fake context, no clickbait
+that oversells, nothing political or hateful. Write in natural Russian (Cyrillic), the way Russian Shorts titles
+are written. No hashtags, no links.
+
+Streamer: {streamer}
+Title a viewer gave this Twitch clip: {clip_title!r}
+Timed transcript of the streamer (seconds, Russian, may be noisy):
+{timed}
+
+Loudest / most hyped moments found in the audio:
+{cands}
+
+Return only JSON: {{"payoff": "A", "screen": "...", "title": "...", "hook": "..."}}
+- payoff: the letter of the moment that is the payoff (the reaction, the punchline), or "" if none fits.
+- screen: the on-screen hook shown from 0:00, in Russian, 2-6 words, at most 30 characters, readable in one glance.
+  It makes the viewer need to see what happens, without spoiling it. Plain words, no emoji, no quotes.
+  Good: "ОН НЕ ОЖИДАЛ ТАКОГО", "ЧАТ В ШОКЕ", "ЭТО БЫЛО ЗРЯ".
+- title: post title in Russian, 4-10 words: who + what happens + the open question. Name the streamer.
+  Never reveal the ending. No emoji.
+- hook: one caption line in Russian (max 80 chars) that invites comments, ideally a short question to the viewer,
+  may end with one fitting emoji.
+- If the transcript and clip title don't make clear what happens, return {{"payoff": "", "screen": "", "title": "", "hook": ""}}."""
+
+
 def timed_transcript(words: list[dict], every: float = 2.5, limit: int = 1800) -> str:
     lines, cur, t0 = [], [], None
     for w in words:
@@ -53,31 +80,34 @@ def timed_transcript(words: list[dict], every: float = 2.5, limit: int = 1800) -
 
 
 def _screen_from(title: str) -> str:
-    words = re.findall(r"[A-Za-z0-9']+", title or "")
+    words = re.findall(r"[^\W_]+(?:'[^\W_]+)?", title or "")
     return " ".join(words[:6]).upper() if len(words) >= 3 else ""
 
 
-def _fallback(clip_title: str, streamer: str) -> dict:
+def _fallback(clip_title: str, streamer: str, language: str = "en") -> dict:
     t = re.sub(r"\s+", " ", clip_title or "").strip()
-    words = re.findall(r"[A-Za-z']+", t)
+    words = re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", t)
     good = len(words) >= 3 and not (t.isupper() and len(words) < 5)
     if not good:
-        return {"title": "", "hook": "", "screen": "WAIT FOR IT…", "payoff": None, "needs_review": True}
-    title = t if streamer.lower() in t.lower() else f"{t} ({streamer}, GTA 6)"
+        return {"title": "", "hook": "", "screen": "ЖДИ КОНЦОВКУ…" if language == "ru" else "WAIT FOR IT…",
+                "payoff": None, "needs_review": True}
+    title = t if streamer.lower() in t.lower() else (f"{t} ({streamer})" if language == "ru" else f"{t} ({streamer}, GTA 6)")
     return {"title": title[:80], "hook": t[:80], "screen": _screen_from(t), "payoff": None, "needs_review": True}
 
 
 def make(clip_title: str, transcript: str, streamer: str, words: list[dict] | None = None,
-         cands: list[dict] | None = None) -> dict:
-    """Returns title, hook (caption line), screen (on-screen hook), payoff (index into cands or None), needs_review."""
+         cands: list[dict] | None = None, language: str = "en") -> dict:
+    """Returns title, hook (caption line), screen (on-screen hook), payoff (index into cands or None), needs_review.
+    language "ru" writes them in Russian for Russian-speaking campaigns."""
+    language = (language or "en").lower()
     if not config.ANTHROPIC_API_KEY:
-        return _fallback(clip_title, streamer)
+        return _fallback(clip_title, streamer, language)
     cands = cands or []
     letters = "ABCDE"
     cand_txt = "\n".join(f"{letters[i]}: at {c['t']:.1f}s, around it: {c['text']!r}" for i, c in enumerate(cands[:5])) or "(none)"
     timed = timed_transcript(words) if words else (transcript or "")[:1500]
     body = {"model": config.TITLE_MODEL, "max_tokens": 2000,
-            "messages": [{"role": "user", "content": PROMPT.format(streamer=streamer, clip_title=clip_title,
+            "messages": [{"role": "user", "content": (PROMPT_RU if language == "ru" else PROMPT).format(streamer=streamer, clip_title=clip_title,
                                                                    timed=timed, cands=cand_txt)}]}
     req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=json.dumps(body).encode(),
                                  headers={"x-api-key": config.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
@@ -88,11 +118,11 @@ def make(clip_title: str, transcript: str, streamer: str, words: list[dict] | No
         m = re.search(r"\{.*\}", text, re.S)
         out = json.loads(m.group(0)) if m else {}
         if not out.get("title"):
-            return _fallback(clip_title, streamer)
+            return _fallback(clip_title, streamer, language)
         letter = str(out.get("payoff") or "").strip().upper()[:1]
         payoff = letters.index(letter) if letter and letter in letters[:len(cands)] else None
         screen = re.sub(r"[\"“”]", "", str(out.get("screen") or "")).strip()[:40] or _screen_from(out["title"])
         return {"title": out["title"][:90], "hook": (out.get("hook") or out["title"])[:90], "screen": screen,
                 "payoff": payoff, "needs_review": False}
     except Exception:
-        return _fallback(clip_title, streamer)
+        return _fallback(clip_title, streamer, language)
