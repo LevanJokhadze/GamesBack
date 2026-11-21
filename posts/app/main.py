@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from . import accounts, assistant, assistant_live, auth, calendar, captions, config, db, seed, submit_api
+from . import accounts, assistant, assistant_live, auth, calendar, captions, config, db, manage, seed, submit_api
 from .workers import runner
 
 app = FastAPI(title="posts.lane.ge API")
@@ -15,6 +15,7 @@ app.add_middleware(CORSMiddleware, allow_origins=config.ALLOWED_ORIGINS, allow_m
 app.include_router(accounts.router, prefix="/api", dependencies=[Depends(auth.require)])
 app.include_router(calendar.router, prefix="/api", dependencies=[Depends(auth.require)])
 app.include_router(assistant.router, prefix="/api", dependencies=[Depends(auth.require)])
+app.include_router(manage.router, prefix="/api", dependencies=[Depends(auth.require)])
 app.include_router(assistant_live.router)  # the voice WebSocket checks its own one-use ticket
 app.include_router(submit_api.router)  # each route sets its own auth (the Whop callback and helper queue differ)
 
@@ -27,6 +28,7 @@ def startup():
     seed.run()
     seed.switch_campaign()
     seed.posting_plan()
+    seed.drop_kreekcraft()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)

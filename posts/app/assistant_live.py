@@ -18,7 +18,7 @@ import re
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from . import assistant, calendar, config, db
+from . import assistant, calendar, config, db, manage
 from .workers import runner
 
 router = APIRouter()
@@ -48,7 +48,8 @@ When he asks "what should I do" or "what's going on", answer with cards, not a l
 
 ACTIONS
 - Safe, do them when asked: run_worker (discover, render, publish, monitor, manual, submit).
-- Changes: mark_submitted, add_post_link, approve_clip, reject_clip, set_account_status. Ask him first in one short sentence ("Mark the Groceries Short as submitted?"), and only after he says yes call the tool with confirmed=true. Never pass confirmed=true on your own.
+- Changes: mark_submitted, add_post_link, approve_clip, reject_clip, set_account_status, remove_post, remove_clip, remove_campaign, reschedule_post, edit_clip, set_campaign_active. Ask him first in one short sentence ("Mark the Groceries Short as submitted?"), and only after he says yes call the tool with confirmed=true. Never pass confirmed=true on your own. Never say something is done until the tool answered ok; if it failed, say what failed.
+- Removing: a queued post is cancelled in Buffer and taken off the dashboard. A post already live on an app can't be deleted from here: it still leaves the dashboard, and you tell him which links to delete on the app (offer open_link for each).
 - Things you can't do here (posting to TikTok or Instagram yourself, changing Railway variables, logging into accounts): say so and open the page he needs instead.
 - Never say you did something unless the tool call just returned ok.
 
@@ -98,6 +99,18 @@ TOOLS = [
     {"name": "set_account_status", "description": "Change an account's status (warming, active, paused, banned, retired). Ask first.",
      "parameters_json_schema": _obj({"account_id": I, "status": {"type": "string", "enum": ["warming", "active", "paused", "banned", "retired"]},
                                      "confirmed": CONFIRMED}, ["account_id", "status", "confirmed"])},
+    {"name": "remove_post", "description": "Remove one post: cancels it in Buffer if it hasn't gone out, and takes it off the dashboard (posts, calendar, totals). A post already live on TikTok/Instagram/YouTube can't be taken down from here: it is still removed from the dashboard, and the answer gives its link so he can delete it on the app. Ask first.",
+     "parameters_json_schema": _obj({"post_id": I, "confirmed": CONFIRMED}, ["post_id", "confirmed"])},
+    {"name": "remove_clip", "description": "Remove a clip with all its posts (cancelled in Buffer where still queued) and its upload reminders, from everywhere on the dashboard. Ask first.",
+     "parameters_json_schema": _obj({"clip_id": I, "confirmed": CONFIRMED}, ["clip_id", "confirmed"])},
+    {"name": "remove_campaign", "description": "Remove a whole campaign (e.g. a streamer we stopped clipping): its clips, posts (queued ones cancelled in Buffer) and upload reminders, and accounts stop targeting its streamer. Use get_snapshot for campaign ids. Ask first, naming the campaign and how many posts go.",
+     "parameters_json_schema": _obj({"campaign_id": I, "confirmed": CONFIRMED}, ["campaign_id", "confirmed"])},
+    {"name": "reschedule_post", "description": "Move a queued post to another time (also in Buffer). due_at is ISO 8601 with its offset, e.g. 2026-11-22T21:00:00+04:00 for 21:00 Tbilisi. Ask first.",
+     "parameters_json_schema": _obj({"post_id": I, "due_at": S, "confirmed": CONFIRMED}, ["post_id", "due_at", "confirmed"])},
+    {"name": "edit_clip", "description": "Change a clip's title or caption (for posts not made yet). Ask first, reading the new text back.",
+     "parameters_json_schema": _obj({"clip_id": I, "title": S, "caption": S, "confirmed": CONFIRMED}, ["clip_id", "confirmed"])},
+    {"name": "set_campaign_active", "description": "Turn a campaign on or off (off: no new clips are cut or posted for it; its posts stay). Ask first.",
+     "parameters_json_schema": _obj({"campaign_id": I, "active": B, "confirmed": CONFIRMED}, ["campaign_id", "active", "confirmed"])},
     # on screen
     {"name": "show_cards", "description": "Put cards on the dashboard (they stack on the right). replace=true clears earlier cards first.",
      "parameters_json_schema": _obj({"cards": {"type": "array", "items": CARD}, "replace": B}, ["cards"])},
@@ -117,7 +130,8 @@ TOOLS = [
      "parameters_json_schema": _obj({"clip_id": I, "platform": {"type": "string", "enum": ["tiktok", "instagram", "youtube"]}}, ["clip_id", "platform"])},
 ]
 UI_TOOLS = {"show_cards", "clear_cards", "open_modal", "create_modal", "close_modal", "navigate", "open_link", "upload_clip"}
-WRITE_TOOLS = {"run_worker", "mark_submitted", "add_post_link", "approve_clip", "reject_clip", "set_account_status"}
+WRITE_TOOLS = {"run_worker", "mark_submitted", "add_post_link", "approve_clip", "reject_clip", "set_account_status",
+               "remove_post", "remove_clip", "remove_campaign", "reschedule_post", "edit_clip", "set_campaign_active"}
 
 
 class NeedsConfirm(Exception):
@@ -209,6 +223,40 @@ def run_tool(name: str, args: dict) -> tuple[object, dict | None]:
         if not r:
             raise ValueError("account not found")
         db.log("assistant", f"Jarvis set @{r['handle']} to {args['status']}")
+        return {"ok": True}, None
+    if name in ("remove_post", "remove_clip", "remove_campaign"):
+        kind = name.split("_")[1]
+        oid = int(args[f"{kind}_id"])
+        _confirm(args, f"remove {kind} #{oid}")
+        try:
+            out = getattr(manage, name)(oid, who="assistant")
+        except LookupError as e:
+            raise ValueError(str(e))
+        return assistant._plain(out), None
+    if name == "reschedule_post":
+        _confirm(args, "move the post")
+        out = manage.reschedule_post(int(args["post_id"]), assistant.datetime.fromisoformat(str(args["due_at"]).replace("Z", "+00:00")),
+                                     who="assistant")
+        return out, None
+    if name == "edit_clip":
+        _confirm(args, "change the clip")
+        from . import captions
+        cid = int(args["clip_id"])
+        if not db.one("SELECT 1 AS x FROM clips WHERE id=%s", (cid,)):
+            raise ValueError("clip not found")
+        if args.get("caption"):
+            db.q("UPDATE clips SET caption=%s WHERE id=%s", (captions.clean(str(args["caption"])), cid))
+        if args.get("title"):
+            db.q("UPDATE clips SET title=%s WHERE id=%s", (str(args["title"])[:200], cid))
+        db.log("assistant", f"Jarvis edited clip #{cid}")
+        return {"ok": True}, None
+    if name == "set_campaign_active":
+        on = bool(args.get("active"))
+        _confirm(args, "turn the campaign " + ("on" if on else "off"))
+        r = db.one("UPDATE campaigns SET active=%s WHERE id=%s RETURNING name", (on, int(args["campaign_id"])))
+        if not r:
+            raise ValueError("campaign not found")
+        db.log("assistant", f"Jarvis turned {r['name']} " + ("on" if on else "off"))
         return {"ok": True}, None
     # on screen
     if name == "show_cards":

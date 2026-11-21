@@ -118,3 +118,30 @@ def posting_plan():
     db.set_setting(PLAN_KEY, True)
     db.log("seed", "posting plan: 2 slots a day (21:00 and 00:00 Tbilisi), max 2 posts a day per account and 1 on "
                    "YouTube, 2.5 h apart; 2 clips cut a day; clips open on their payoff with a text hook")
+
+
+# --- 21 Nov 2026: no more KreekCraft clips at all; take every KreekCraft post off the schedule and the dashboard ---
+DROP_KREEK_KEY = "drop_kreekcraft_2026_11_21"
+
+
+def drop_kreekcraft():
+    """Once (retried on the next start while a Buffer post couldn't be cancelled): the KreekCraft campaign goes with
+    its clips and posts; queued posts are cancelled in Buffer; posts already live are listed in the event log with
+    their links, to delete on the app by hand. Bobby VanRiper stays."""
+    from . import manage
+    if db.settings().get(DROP_KREEK_KEY):
+        return
+    done = True
+    for ca in db.q("SELECT id FROM campaigns WHERE 'kreekcraft' = ANY(channels) OR name ILIKE '%%kreekcraft%%'"):
+        try:
+            r = manage.remove_campaign(ca["id"], who="seed")
+        except Exception as e:  # Buffer down or rate-limited: try again on the next start
+            db.log("seed", f"KreekCraft removal failed, will retry: {e}", "warn")
+            done = False
+            continue
+        done = done and r["campaign_removed"]
+        print("[seed] KreekCraft removed:", {k: v for k, v in r.items()}, flush=True)
+    db.q("""UPDATE accounts SET streamers = ARRAY(SELECT s FROM unnest(streamers) s WHERE lower(s) <> 'kreekcraft')
+            WHERE EXISTS (SELECT 1 FROM unnest(streamers) s WHERE lower(s) = 'kreekcraft')""")
+    if done:
+        db.set_setting(DROP_KREEK_KEY, True)
