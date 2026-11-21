@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from .. import db, notify
-from .publish import ET, day_cap
+from .publish import ET, day_cap, slot_plan, zone_label
 
 LEAD = timedelta(minutes=10)     # email this long before the slot, so there's time to download
 WINDOW = timedelta(minutes=50)   # a slot missed by more than this (worker paused, deploy) is skipped
@@ -18,15 +18,25 @@ WEEK = timedelta(days=7)
 LIVE_STATUSES = ("warming", "active")
 
 
-def slot_times(s: dict, around: datetime) -> list[datetime]:
-    """Slot times (UTC) from yesterday to tomorrow, US Eastern."""
+def geo_of(account: dict) -> str | None:
+    """The account's geo code (RU, US, ...): on the row when the query joined geos, else looked up."""
+    code = account.get("geo") or account.get("geo_code")
+    if not code and account.get("geo_id"):
+        row = db.one("SELECT code FROM geos WHERE id=%s", (account["geo_id"],))
+        code = row["code"] if row else None
+    return code.upper() if code else None
+
+
+def slot_times(s: dict, around: datetime, geo: str | None = None) -> list[datetime]:
+    """Slot times (UTC) from yesterday to the day after tomorrow, in the geo's own timezone (default US Eastern)."""
+    tz, slots = slot_plan(s, geo)
     out = []
-    d0 = around.astimezone(ET).date()
+    d0 = around.astimezone(tz).date()
     for dd in (-1, 0, 1, 2):
         d = d0 + timedelta(days=dd)
-        for hhmm in sorted(s.get("slots_et") or ["19:00"]):
+        for hhmm in slots:
             h, mi = map(int, hhmm.split(":"))
-            out.append(datetime(d.year, d.month, d.day, h, mi, tzinfo=ET).astimezone(timezone.utc))
+            out.append(datetime(d.year, d.month, d.day, h, mi, tzinfo=tz).astimezone(timezone.utc))
     return sorted(out)
 
 
@@ -42,7 +52,7 @@ def next_slot(account: dict, s: dict, now: datetime | None = None) -> datetime |
     btz = ZoneInfo(s.get("buffer_timezone") or "Asia/Tbilisi")
     done = {r["slot_at"] for r in db.q("SELECT slot_at FROM manual_uploads WHERE account_id=%s AND slot_at > now() - interval '2 days'",
                                        (account["id"],))}
-    for t in slot_times(s, now):
+    for t in slot_times(s, now, geo_of(account)):
         if t + WINDOW < now or t in done:
             continue
         if _day_count(account["id"], t, btz) >= day_cap(account["platform"], s):
@@ -89,20 +99,22 @@ def send_one(account: dict, slot: datetime) -> dict | None:
                     ON CONFLICT (account_id, clip_id) DO NOTHING RETURNING *""", (account["id"], clip["id"], slot))
     if not row:
         return None
+    tz, _ = slot_plan(db.settings(), geo_of(account))
     try:
-        notify.manual_upload(account, clip, slot)
+        notify.manual_upload(account, clip, slot, tz.key)
     except Exception as e:
         db.q("DELETE FROM manual_uploads WHERE id=%s", (row["id"],))  # try again on the next run
         db.log("manual", f"upload reminder for {account['platform']} @{account['handle']} failed: {e}", "error")
         raise
     db.q("UPDATE manual_uploads SET emailed_at=now() WHERE id=%s", (row["id"],))
     db.log("manual", f"emailed: upload clip #{clip['id']} to {account['platform']} @{account['handle']} "
-                     f"at {slot.astimezone(ET):%a %H:%M} ET")
+                     f"at {slot.astimezone(tz):%a %H:%M} {zone_label(tz)}")
     return row
 
 
 def manual_accounts() -> list[dict]:
-    return db.q("SELECT * FROM accounts WHERE upload_mode='manual' AND status = ANY(%s) ORDER BY id", (list(LIVE_STATUSES),))
+    return db.q("""SELECT a.*, g.code AS geo_code FROM accounts a LEFT JOIN geos g ON g.id = a.geo_id
+                   WHERE a.upload_mode='manual' AND a.status = ANY(%s) ORDER BY a.id""", (list(LIVE_STATUSES),))
 
 
 def run():
@@ -113,7 +125,7 @@ def run():
     now = datetime.now(timezone.utc)
     sent = 0
     for a in manual_accounts():
-        for t in slot_times(s, now):
+        for t in slot_times(s, now, geo_of(a)):
             if not (t - LEAD <= now < t + WINDOW):
                 continue
             if db.one("SELECT 1 AS x FROM manual_uploads WHERE account_id=%s AND slot_at=%s", (a["id"], t)):

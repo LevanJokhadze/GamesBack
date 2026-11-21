@@ -6,6 +6,7 @@ Each channel is planned on its own (YouTube via Buffer allows fewer posts a day 
 can go out on TikTok tonight and on Shorts tomorrow. A channel that refuses a post is retried on the next run,
 at that channel's next free slot.
 """
+import re
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -13,6 +14,24 @@ from .. import db
 from ..integrations import buffer
 
 ET = ZoneInfo("America/New_York")
+_HHMM = re.compile(r"([01]?\d|2[0-3]):[0-5]\d")
+
+
+def slot_plan(s: dict, geo: str | None = None) -> tuple[ZoneInfo, list[str]]:
+    """Timezone and HH:MM slots for accounts of this geo: settings.geo_slots[geo] when set, else the US Eastern
+    slots (settings.slots_et)."""
+    g = (s.get("geo_slots") or {}).get((geo or "").upper()) or {}
+    slots = sorted(x for x in (g.get("slots") or []) if _HHMM.fullmatch(str(x)))
+    if slots:
+        try:
+            return ZoneInfo(g.get("tz") or "America/New_York"), slots
+        except Exception:  # unknown timezone name: fall back to the default slots
+            pass
+    return ET, sorted(s.get("slots_et") or ["19:00"])
+
+
+def zone_label(tz: ZoneInfo) -> str:
+    return "US Eastern" if tz.key == "America/New_York" else tz.key.split("/")[-1].replace("_", " ")
 
 
 def day_cap(service: str, s: dict) -> int:
@@ -25,20 +44,20 @@ def min_gap(s: dict) -> int:
     return int(float(s.get("min_gap_minutes") or 60) * 60)
 
 
-def next_slot(channel_id: str, service: str, s: dict, after: datetime) -> datetime:
-    """Next posting time from the US-Eastern slots that is at least `min_gap_minutes` from any other post on this
+def next_slot(channel_id: str, service: str, s: dict, after: datetime, geo: str | None = None) -> datetime:
+    """Next posting time from the channel's slots (its geo's, else US Eastern) that is at least `min_gap_minutes` from any other post on this
     channel and whose day still has room. Days are counted in Buffer's own timezone, the one its daily limits use."""
-    slots = sorted(s.get("slots_et") or ["19:00"])
+    tz, slots = slot_plan(s, geo)
     taken = [r["due_at"] for r in db.q("""SELECT due_at FROM posts WHERE channel_id=%s AND status <> 'deleted'
                                           AND due_at > now() - interval '2 days'""", (channel_id,))]
     cap = day_cap(service, s)
     gap = min_gap(s)
     btz = ZoneInfo(s.get("buffer_timezone") or "Asia/Tbilisi")
-    day = after.astimezone(ET).date()
+    day = after.astimezone(tz).date()
     for _ in range(30):
         for hhmm in slots:
             h, mi = map(int, hhmm.split(":"))
-            t = datetime(day.year, day.month, day.day, h, mi, tzinfo=ET).astimezone(timezone.utc)
+            t = datetime(day.year, day.month, day.day, h, mi, tzinfo=tz).astimezone(timezone.utc)
             if t <= after or any(abs((x - t).total_seconds()) < gap for x in taken):
                 continue
             if sum(1 for x in taken if x.astimezone(btz).date() == t.astimezone(btz).date()) >= cap:
@@ -121,7 +140,7 @@ def run():
         for ch in missing:
             i = order.get(ch["service"], 0)
             # same slot as the platforms before it, plus the stagger, so TikTok -> Reels -> Shorts
-            due = next_slot(ch["id"], ch["service"], s, earliest) + timedelta(minutes=stagger * i)
+            due = next_slot(ch["id"], ch["service"], s, earliest, by_geo.get(ch["id"])) + timedelta(minutes=stagger * i)
             try:
                 p = buffer.create_video_post(ch, clip["video_url"], clip["title"] or "", clip["caption"] or "",
                                              due.strftime("%Y-%m-%dT%H:%M:%S.000Z"))

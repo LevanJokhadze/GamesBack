@@ -97,7 +97,8 @@ def list_accounts():
         a["manual"] = None
         if a["upload_mode"] == "manual":
             a["manual"] = {"day": notify.manual_day(a), "uploads": uploads.get(a["id"], []),
-                           "next_at": manual.next_slot(a, s) if a["status"] in manual.LIVE_STATUSES else None}
+                           "next_at": manual.next_slot(a, s) if a["status"] in manual.LIVE_STATUSES else None,
+                           "slot_tz": manual.slot_plan(s, manual.geo_of(a))[0].key}
     streamers = sorted({s for r in db.q("SELECT channels FROM campaigns") for s in (r["channels"] or [])}
                        | {s for a in accounts for s in a["streamers"]}, key=str.lower)
     return {"geos": geos, "accounts": accounts, "buffer_channels": _buffer_channels(), "streamers": streamers,
