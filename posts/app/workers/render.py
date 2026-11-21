@@ -101,7 +101,9 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     t = titles.make(m["title"] or "", transcript, streamer, words=words, cands=cands, language=c.get("language") or "en")
     if screen:  # re-render: keep the on-screen hook the clip already has
         t["screen"] = screen
-    title = apply_title_template(c, t["title"] or (m["title"] or ""))
+    plain = t["title"] or (m["title"] or "")
+    t["hook"] = t.get("hook") or plain  # never the templated title: the caption template repeats its own wrapper
+    title = apply_title_template(c, plain)
     # the payoff the clip opens on: the model's pick from the candidates, else the loudest moment
     pick = cands[t["payoff"]] if t.get("payoff") is not None else (cands[0] if cands else None)
     second = next((x["t"] for x in cands if pick and x is not pick), None)
@@ -140,6 +142,9 @@ def render_one(c: dict, m: dict) -> int:
     try:
         b = build(c, m, work)
         final, dur, title, t, plan, cands = b["final"], b["duration"], b["title"], b["texts"], b["plan"], b["candidates"]
+        if t.get("why"):
+            db.log("render", f"{m['external_id']}: the title writer's texts were not used ({t['why']}); "
+                             f"the clip waits in Review with a stand-in title", "warn")
         if int(plan["source"].split("x")[1]) < 720:
             db.log("render", f"{m['external_id']}: Twitch only gave a {plan['source']} source, the clip will look soft", "warn")
         thumb = work / "thumb.jpg"
