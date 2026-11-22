@@ -359,14 +359,17 @@ def bigballs_trends():
 
 
 def retry_trend_downloads():
-    """Once: the first trending Shorts failed to download (YouTube's bot check, then no formats listed); put them
-    back in the queue now that render signs in with YTDLP_COOKIES and tries several YouTube player clients, and let
-    BigBalls render up to 11 clips today so they get a slot."""
-    key = "retry_trend_downloads_2026_11_22"
+    """Once per fix: the first trending Shorts failed to download (YouTube's bot check, then no formats listed:
+    Deno was too old for yt-dlp); put them back in the queue and give BigBalls 3 more render slots today."""
+    key = "retry_trend_downloads_2026_11_22c"
     if db.settings().get(key):
         return
+    from .workers import render
     back = db.q("""UPDATE moments SET status='new', reason=NULL, updated_at=now()
                    WHERE source IN ('yt_short','ig_reel') AND status='failed' RETURNING id""")
-    db.q("UPDATE campaigns SET daily_quota=GREATEST(daily_quota, 11) WHERE url='https://t.me/Bigballs_tiktok_bot'")
+    for c in db.q("SELECT id, daily_quota FROM campaigns WHERE url='https://t.me/Bigballs_tiktok_bot'"):
+        want = render.rendered_today(c["id"]) + len(back)
+        if back and (c["daily_quota"] or 0) < want:
+            db.q("UPDATE campaigns SET daily_quota=%s WHERE id=%s", (want, c["id"]))
     db.set_setting(key, True)
-    db.log("seed", f"{len(back)} trending Short(s) back in the render queue; BigBalls daily quota at least 11")
+    db.log("seed", f"{len(back)} trending Short(s) back in the render queue, with a render slot each today")
