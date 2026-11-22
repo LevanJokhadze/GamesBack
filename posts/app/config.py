@@ -15,6 +15,13 @@ ALLOWED_ORIGINS = [o.strip() for o in (env("ALLOWED_ORIGINS", "*") or "*").split
 
 BUFFER_API_KEY = env("BUFFER_API_KEY")
 BLOB_READ_WRITE_TOKEN = env("BLOB_READ_WRITE_TOKEN")
+# Railway bucket for clips (integrations/blob.py); set as references, e.g. BUCKET_NAME=${{clips.BUCKET}}
+BUCKET_ENDPOINT = env("BUCKET_ENDPOINT")
+BUCKET_NAME = env("BUCKET_NAME")
+BUCKET_REGION = env("BUCKET_REGION")
+BUCKET_ACCESS_KEY_ID = env("BUCKET_ACCESS_KEY_ID")
+BUCKET_SECRET_ACCESS_KEY = env("BUCKET_SECRET_ACCESS_KEY")
+BUCKET_URL_STYLE = env("BUCKET_URL_STYLE", "virtual") or "virtual"  # "path" for older Railway buckets
 # Optional: a YouTube Data API v3 key (Google Cloud console). Reads public view/like/comment counts of our Shorts,
 # since Buffer's post metrics may not cover YouTube. Free: 1 quota unit per 50 videos, 10,000 units a day.
 YOUTUBE_API_KEY = env("YOUTUBE_API_KEY")
