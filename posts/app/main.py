@@ -38,6 +38,7 @@ def startup():
     seed.bigballs_campaign()
     seed.bigballs_trends()
     seed.retry_trend_downloads()
+    seed.retry_after_storage_move()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)
@@ -363,3 +364,14 @@ def run_worker(name: str):
     if not runner.trigger(name):
         raise HTTPException(404, "unknown worker")
     return {"ok": True}
+
+
+@app.api_route("/media/{key:path}", methods=["GET", "HEAD"])
+def media(key: str):
+    """Our clips, thumbnails, banners and overlays in the Railway bucket (private): a redirect to a signed link.
+    Everything stored there was public on Vercel Blob before, so this needs no login (Buffer and the dashboard fetch it)."""
+    from fastapi.responses import RedirectResponse
+    from .integrations import blob
+    if not blob.bucket_on() or not key or ".." in key.split("/"):
+        raise HTTPException(404, "not found")
+    return RedirectResponse(blob.signed(key), status_code=302, headers={"Cache-Control": "public, max-age=3600"})

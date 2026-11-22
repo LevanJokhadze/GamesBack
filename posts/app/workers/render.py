@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,9 +38,14 @@ def rendered_today(campaign_id: int) -> int:
 SKIPS_PER_RUN = 8   # moments one run may pass over (nudity, no speech, ...) before it gives the other workers a turn
 
 
+_paused: dict[int, float] = {}
+
+
 def run():
     for c in db.q("SELECT * FROM campaigns WHERE active ORDER BY id"):
         if rendered_today(c["id"]) >= (c["daily_quota"] or 0):
+            continue
+        if not assets_ready(c) or _paused.get(c["id"], 0) > time.time():
             continue
         for _ in range(SKIPS_PER_RUN):
             m = db.one("""UPDATE moments SET status='rendering', updated_at=now() WHERE id = (
@@ -51,6 +57,13 @@ def run():
                 clip_id = render_one(c, m)
                 db.q("UPDATE moments SET status='rendered', updated_at=now() WHERE id=%s", (m["id"],))
                 db.log("render", f"clip #{clip_id} ready: {m['title']!r} ({m['views']} views on Twitch)")
+            except SourceBlocked as e:
+                # back in the queue untouched, and the campaign waits an hour (new cookies end the wait on restart)
+                db.q("UPDATE moments SET status='new', updated_at=now() WHERE id=%s", (m["id"],))
+                _paused[c["id"]] = time.time() + 3600
+                db.log("render", f"{c['name']}: paused for an hour, YouTube won't let us download Shorts: the "
+                                 f"YTDLP_COOKIES sign-in expired; paste fresh cookies ({str(e)[-200:]})", "warn")
+                break
             except Skip as e:
                 db.q("UPDATE moments SET status='skipped', reason=%s, updated_at=now() WHERE id=%s", (str(e)[:500], m["id"]))
                 db.log("render", f"skipped {m['external_id']}: {e}", "warn")
@@ -73,12 +86,31 @@ def ytdlp_trend_cmd(work: Path, *args: str, clients: str = "") -> list[str]:
     """yt-dlp for someone else's Short/Reel, signed in with YTDLP_COOKIES when set (YouTube bot-checks cloud IPs)."""
     cmd = [sys.executable, "-m", "yt_dlp"]
     if config.YTDLP_COOKIES:
-        cookies = work / "cookies.txt"
-        cookies.write_text(config.YTDLP_COOKIES)
-        cmd += ["--cookies", str(cookies)]
+        cmd += ["--cookies", str(cookie_file())]
     if clients:
         cmd += ["--extractor-args", f"youtube:player_client={clients}"]
     return cmd + list(args)
+
+
+def cookie_file() -> Path:
+    """One cookies.txt per container, kept between downloads: yt-dlp saves the cookies YouTube refreshes back into
+    it, so the sign-in lasts longer than a fresh copy of YTDLP_COOKIES each time. A new YTDLP_COOKIES replaces it."""
+    import hashlib
+    f = config.WORK_DIR / "yt-cookies.txt"
+    tag = f.with_suffix(".src")
+    h = hashlib.sha1(config.YTDLP_COOKIES.encode()).hexdigest()
+    if not f.exists() or not tag.exists() or tag.read_text() != h:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(config.YTDLP_COOKIES)
+        tag.write_text(h)
+    return f
+
+
+class SourceBlocked(RuntimeError):
+    """YouTube refuses every download until someone acts (cookies expired, sign-in asked): the moment is not at fault."""
+
+
+BLOCKED_SIGNS = ("cookies are no longer valid", "Sign in to confirm", "account cookies")
 
 
 # YouTube player clients tried in turn for a trending Short: signed in from a cloud IP, a client may list no
@@ -99,7 +131,10 @@ def download_trend(work: Path, url: str, src: Path):
         except RuntimeError as e:
             errors.append(f"[{clients or 'default'}] {str(e)[-500:]}")
             print(f"[render] {url}: yt-dlp ({clients or 'default'} clients) failed: {str(e)[-1500:]}", flush=True)
-    raise RuntimeError(" | ".join(errors)[-1800:])
+    msg = " | ".join(errors)[-1800:]
+    if errors and all(any(sign in e for sign in BLOCKED_SIGNS) for e in errors):
+        raise SourceBlocked(msg)
+    raise RuntimeError(msg)
 
 
 class Skip(Exception):
@@ -187,11 +222,7 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     cut = next((job / "edits").glob("*.mp4"))
     layout = json.loads(next((job / "edits").glob("*.json")).read_text()).get("layout", "react")
     final = work / "final.mp4"
-    ov = None
-    if c["overlay_url"]:
-        ov = work / "overlay.png"
-        sh([sys.executable, "-c", "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])",
-            c["overlay_url"], str(ov)])
+    ov = asset_file(c["overlay_url"], ".png") if c["overlay_url"] else None
     hook.finish(cut, final, plan, t.get("screen") or "", layout=layout, hook_secs=c["title_secs"] or 5,
                 overlay=ov, overlay_width=c["overlay_width"] or 600, overlay_y=c["overlay_y"] or 895,
                 punch=c.get("punch_zoom") is not False)
@@ -211,17 +242,52 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     return {"final": final, "duration": dur, "title": title, "texts": t, "plan": plan, "candidates": cands}
 
 
-def banner_file(url: str) -> Path:
-    """The campaign's banner, downloaded once per container (they are 15-40 MB)."""
+def asset_file(url: str, default_ext: str) -> Path:
+    """A campaign's overlay or banner, downloaded once per container (banners are 15-40 MB)."""
     import hashlib
-    ext = Path(url.split("?")[0]).suffix.lower() if Path(url.split("?")[0]).suffix.lower() in (".mp4", ".mov", ".webm") else ".mp4"
-    f = config.WORK_DIR / "banners" / f"{hashlib.sha1(url.encode()).hexdigest()[:16]}{ext}"
+    ext = Path(url.split("?")[0]).suffix.lower()
+    ext = ext if ext in (".mp4", ".mov", ".webm", ".png", ".jpg", ".jpeg", ".webp") else default_ext
+    f = config.WORK_DIR / "assets" / f"{hashlib.sha1(url.encode()).hexdigest()[:16]}{ext}"
     if not f.exists():
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = f.with_name(f.name + ".part")
-        sh([sys.executable, "-c", "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])", url, str(tmp)])
+        try:
+            sh([sys.executable, "-c", "import sys,urllib.request;urllib.request.urlretrieve(sys.argv[1],sys.argv[2])",
+                url, str(tmp)])
+        except Exception as e:
+            tmp.unlink(missing_ok=True)
+            raise AssetMissing(f"could not download {url}: {str(e)[-300:]}") from e
         tmp.replace(f)
     return f
+
+
+def banner_file(url: str) -> Path:
+    return asset_file(url, ".mp4")
+
+
+class AssetMissing(RuntimeError):
+    """A campaign's overlay or banner can't be downloaded (e.g. the old Vercel Blob store is blocked)."""
+
+
+_asset_warned: dict[int, float] = {}
+
+
+def assets_ready(c: dict) -> bool:
+    """Download the campaign's overlay and banner before taking a moment, so a dead link pauses the campaign
+    (with a warning at most hourly) instead of failing its best moments one by one."""
+    try:
+        if c.get("overlay_url"):
+            asset_file(c["overlay_url"], ".png")
+        if c.get("banner_url"):
+            banner_file(c["banner_url"])
+        _asset_warned.pop(c["id"], None)
+        return True
+    except AssetMissing as e:
+        if time.time() - _asset_warned.get(c["id"], 0) > 3600:
+            _asset_warned[c["id"]] = time.time()
+            db.log("render", f"{c['name']}: paused, its overlay or banner is unreachable; upload it again on the "
+                             f"Campaigns page ({e})", "warn")
+        return False
 
 
 def render_one(c: dict, m: dict) -> int:

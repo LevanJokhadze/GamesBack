@@ -8,6 +8,7 @@ faster-whisper>=1.1
 numpy>=1.26
 opencv-python-headless>=4.9
 requests>=2.31
+boto3>=1.35
 huggingface_hub
 cryptography>=43
 google-genai>=3.6

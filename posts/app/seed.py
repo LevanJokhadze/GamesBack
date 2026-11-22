@@ -373,3 +373,18 @@ def retry_trend_downloads():
             db.q("UPDATE campaigns SET daily_quota=%s WHERE id=%s", (want, c["id"]))
     db.set_setting(key, True)
     db.log("seed", f"{len(back)} trending Short(s) back in the render queue, with a render slot each today")
+
+
+def retry_after_storage_move():
+    """Once, after clips moved to the Railway bucket (22 Nov 2026): moments that failed today because the Vercel Blob
+    store was blocked, or because the YouTube cookies had expired, go back in the render queue."""
+    key = "retry_after_storage_move_2026_11_22"
+    from .integrations import blob
+    if db.settings().get(key) or not blob.bucket_on():
+        return
+    back = db.q("""UPDATE moments SET status='new', reason=NULL, updated_at=now()
+                   WHERE status='failed' AND updated_at > '2026-11-22T00:00:00Z'
+                     AND (reason ILIKE '%%cookies%%' OR reason ILIKE '%%HTTP Error 4%%' OR reason ILIKE '%%blob%%'
+                          OR reason ILIKE '%%vercel%%' OR reason ILIKE '%%blocked%%') RETURNING id""")
+    db.set_setting(key, True)
+    db.log("seed", f"files now go to the Railway bucket; {len(back)} moment(s) that failed today are back in the queue")
