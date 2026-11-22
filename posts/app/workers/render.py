@@ -69,6 +69,18 @@ TREND_SOURCES = ("yt_short", "ig_reel")
 TREND_FORMAT = "bv*[height<=1920]+ba/b"
 
 
+def ytdlp_trend_cmd(work: Path, *args: str, clients: str = "") -> list[str]:
+    """yt-dlp for someone else's Short/Reel, signed in with YTDLP_COOKIES when set (YouTube bot-checks cloud IPs)."""
+    cmd = [sys.executable, "-m", "yt_dlp"]
+    if config.YTDLP_COOKIES:
+        cookies = work / "cookies.txt"
+        cookies.write_text(config.YTDLP_COOKIES)
+        cmd += ["--cookies", str(cookies)]
+    if clients:
+        cmd += ["--extractor-args", f"youtube:player_client={clients}"]
+    return cmd + list(args)
+
+
 class Skip(Exception):
     pass
 
@@ -96,13 +108,9 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     trend = (m.get("source") or "") in TREND_SOURCES
     if trend:
         # someone else's Short or Reel (the trends worker): its best vertical video + audio
-        cmd = [sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1920,fps", "-f", TREND_FORMAT,
-               "--merge-output-format", "mp4", "-o", str(src), m["url"]]
-        if config.YTDLP_COOKIES:
-            cookies = work / "cookies.txt"
-            cookies.write_text(config.YTDLP_COOKIES)
-            cmd[3:3] = ["--cookies", str(cookies)]
-        sh(cmd, timeout=600)
+        # warnings stay on: a failure then says why (a missing JS runtime, expired cookies, ...)
+        sh(ytdlp_trend_cmd(work, "-q", "-S", "res:1920,fps", "-f", TREND_FORMAT, "--merge-output-format", "mp4",
+                           "-o", str(src), m["url"]), timeout=600)
     else:
         sh([sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1080,fps", "-f", SOURCE_FORMAT,
             "-o", str(src), m["url"]], timeout=600)

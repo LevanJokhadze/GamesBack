@@ -335,6 +335,28 @@ def notify_test():
     return {"ok": True}
 
 
+@app.get("/api/debug/ytdlp", dependencies=[A])
+def debug_ytdlp(url: str, clients: str = ""):
+    """yt-dlp -v -F for a Short/Reel URL, as the render worker would fetch it: why a download fails."""
+    import re as _re
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    if not _re.fullmatch(r"https://(www\.)?(youtube\.com/(shorts/|watch\?v=)|youtu\.be/|instagram\.com/)[\w\-/?=&.]+", url):
+        raise HTTPException(400, "not a YouTube or Instagram URL")
+    if clients and not _re.fullmatch(r"[a-z_,]+", clients):
+        raise HTTPException(400, "clients: comma-separated yt-dlp player client names")
+    with tempfile.TemporaryDirectory() as d:
+        cmd = render.ytdlp_trend_cmd(Path(d), "-v", "-F", url, clients=clients)
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=150)
+            code, out = r.returncode, (r.stderr or "") + "\n" + (r.stdout or "")
+        except subprocess.TimeoutExpired:
+            code, out = -1, "timed out"
+    lines = [ln for ln in out.splitlines() if "cookie" not in ln.lower() or "[debug]" not in ln]
+    return {"code": code, "out": "\n".join(lines)[-8000:]}
+
+
 @app.post("/api/workers/{name}/run", dependencies=[A])
 def run_worker(name: str):
     if not runner.trigger(name):
