@@ -5,11 +5,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg fonts-de
 
 WORKDIR /srv
 COPY requirements.txt .
+# yt-dlp[deno] brings the Deno version yt-dlp needs (2.9.8+) to solve YouTube's player challenges; without it a
+# signed-in YouTube download lists no video formats ("n challenge solving failed", "Requested format is not available")
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Deno: yt-dlp needs a JavaScript runtime to solve YouTube's player challenges; without one a signed-in YouTube
-# download lists no video formats ("Requested format is not available").
-COPY --from=denoland/deno:bin-2.1.4 /deno /usr/local/bin/deno
 
 # Models baked into the image so a fresh deploy can render right away:
 # YuNet face detector (webcam finder) and the faster-whisper "small" model used by moments.py.
