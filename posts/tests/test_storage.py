@@ -94,3 +94,28 @@ def test_cookie_file_kept_until_new_cookies(monkeypatch, tmp_path):
     assert render.cookie_file().read_text() == "one, refreshed by yt-dlp"
     monkeypatch.setattr(config, "YTDLP_COOKIES", "two")
     assert render.cookie_file().read_text() == "two"
+
+
+def test_restore_rerenders_newest_dead_clip_and_marks_failures(monkeypatch):
+    _bucket(monkeypatch)
+    calls, marked = [], []
+
+    def q(sql, params=None):
+        if sql.lstrip().startswith("SELECT cl.id"):
+            assert params == (render.DEAD_STORE,)
+            return [{"id": 7, "campaign_id": 1}, {"id": 5, "campaign_id": 1}]
+        marked.append(params)
+        return []
+
+    monkeypatch.setattr(render.db, "q", q)
+    monkeypatch.setattr(render.db, "one", lambda sql, p=None: {"id": 1, "name": "X"})
+    monkeypatch.setattr(render, "assets_ready", lambda c: True)
+
+    def boom(cid):
+        calls.append(cid)
+        raise RuntimeError("source gone")
+
+    monkeypatch.setattr(render, "rerender", boom)
+    assert render.restore_one() is True
+    assert calls == [7] and marked and marked[0][0].startswith("restore failed: source gone")
+    blob._s3.cache_clear()

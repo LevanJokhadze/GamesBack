@@ -41,7 +41,32 @@ SKIPS_PER_RUN = 8   # moments one run may pass over (nudity, no speech, ...) bef
 _paused: dict[int, float] = {}
 
 
+DEAD_STORE = "%blob.vercel-storage.com%"  # the Vercel Blob store blocked on 22 Nov 2026; its files can't be read back
+
+
+def restore_one() -> bool:
+    """Re-render one waiting clip (Review or Approved) whose video sits on the blocked Vercel store, newest first,
+    so it plays again from the Railway bucket. Runs before new clips; a clip that fails is marked and left alone."""
+    if not blob.bucket_on():
+        return False
+    for clip in db.q("""SELECT cl.id, cl.campaign_id FROM clips cl WHERE cl.status IN ('review','approved')
+                          AND cl.video_url LIKE %s AND cl.moment_id IS NOT NULL
+                          AND (cl.error IS NULL OR cl.error NOT LIKE 'restore failed%%')
+                        ORDER BY cl.created_at DESC LIMIT 20""", (DEAD_STORE,)):
+        c = db.one("SELECT * FROM campaigns WHERE id=%s", (clip["campaign_id"],))
+        if not c or not assets_ready(c):
+            continue
+        try:
+            rerender(clip["id"])
+        except Exception as e:
+            db.q("UPDATE clips SET error=%s WHERE id=%s", (f"restore failed: {str(e)[:400]}", clip["id"]))
+        return True
+    return False
+
+
 def run():
+    if restore_one():
+        return True
     for c in db.q("SELECT * FROM campaigns WHERE active ORDER BY id"):
         if rendered_today(c["id"]) >= (c["daily_quota"] or 0):
             continue
