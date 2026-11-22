@@ -38,6 +38,7 @@ def startup():
     seed.bigballs_campaign()
     seed.bigballs_trends()
     seed.retry_trend_downloads()
+    seed.rehost_boeshi_overlay()
     seed.retry_after_storage_move()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):

@@ -388,3 +388,30 @@ def retry_after_storage_move():
                           OR reason ILIKE '%%vercel%%' OR reason ILIKE '%%blocked%%') RETURNING id""")
     db.set_setting(key, True)
     db.log("seed", f"files now go to the Railway bucket; {len(back)} moment(s) that failed today are back in the queue")
+
+
+def rehost_boeshi_overlay():
+    """Once, after the move to the Railway bucket: Boeshi's overlay was on the blocked Vercel Blob store; fetch it from
+    Google Drive again and store it in the bucket. (BigBalls' banner came from Telegram: upload it on the Campaigns page.)"""
+    import tempfile
+    import urllib.request
+    from pathlib import Path
+    from .integrations import blob
+    key = "rehost_boeshi_overlay_2026_11_22"
+    c = db.one("SELECT id, overlay_url FROM campaigns WHERE url=%s", (BOESHI_URL,))
+    if db.settings().get(key) or not blob.bucket_on() or not c or "vercel-storage.com" not in (c["overlay_url"] or ""):
+        return
+    try:
+        tmp = Path(tempfile.mkdtemp()) / "boeshi.png"
+        req = urllib.request.Request(BOESHI_OVERLAY_SRC, headers={"user-agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            tmp.write_bytes(r.read())
+        if tmp.read_bytes()[:8] != b"\x89PNG\r\n\x1a\n":
+            raise RuntimeError("Google Drive did not return a PNG")
+        url = blob.upload(tmp, "overlays/boeshi.png", "image/png")
+    except Exception as e:
+        db.log("seed", f"Boeshi overlay could not be re-hosted, will retry on next start: {e}", "warn")
+        return
+    db.q("UPDATE campaigns SET overlay_url=%s WHERE id=%s", (url, c["id"]))
+    db.set_setting(key, True)
+    db.log("seed", "Boeshi overlay moved to the Railway bucket")
