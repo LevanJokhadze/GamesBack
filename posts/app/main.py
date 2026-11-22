@@ -37,6 +37,7 @@ def startup():
     seed.russian_campaigns()
     seed.bigballs_campaign()
     seed.bigballs_trends()
+    seed.retry_trend_downloads()
     # a changed BUFFER_API_KEY redeploys the service: test the (maybe new) key for stats on the first monitor run
     if db.settings().get("stats_scope_missing"):
         db.set_setting("stats_scope_missing", False)

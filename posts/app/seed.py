@@ -356,3 +356,17 @@ def bigballs_trends():
     db.set_setting(key, True)
     db.log("seed", "BigBalls: trend tags evelone, buster, strogo, s1mple, donk, monesy; banner fitted to the clip "
                    "width; ball race under the streamer")
+
+
+def retry_trend_downloads():
+    """Once: the first trending Shorts failed to download (YouTube's bot check, then no formats listed); put them
+    back in the queue now that render signs in with YTDLP_COOKIES and tries several YouTube player clients, and let
+    BigBalls render up to 11 clips today so they get a slot."""
+    key = "retry_trend_downloads_2026_11_22"
+    if db.settings().get(key):
+        return
+    back = db.q("""UPDATE moments SET status='new', reason=NULL, updated_at=now()
+                   WHERE source IN ('yt_short','ig_reel') AND status='failed' RETURNING id""")
+    db.q("UPDATE campaigns SET daily_quota=GREATEST(daily_quota, 11) WHERE url='https://t.me/Bigballs_tiktok_bot'")
+    db.set_setting(key, True)
+    db.log("seed", f"{len(back)} trending Short(s) back in the render queue; BigBalls daily quota at least 11")
