@@ -531,6 +531,37 @@ export class PgStore implements Store {
 
   async init() {
     await this.pool.query(SCHEMA);
+    await this.runOneOffs();
+  }
+
+  /**
+   * One-time data changes, each applied at most once (recorded in one_off_changes).
+   * The old values are copied to a backup table first so a change can be undone.
+   */
+  private async runOneOffs() {
+    await this.pool.query(`CREATE TABLE IF NOT EXISTS one_off_changes (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now(), detail text NOT NULL DEFAULT '')`);
+    // 2026-11-22: +30 Elo for every registered account (bots and guests have no row in users).
+    // Undo: UPDATE users u SET rating = u.rating - 30, peak = b.peak FROM elo_bonus_2026_11_22_backup b WHERE b.id = u.id;
+    const name = "elo_bonus_30_2026_11_22";
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const mark = await client.query(`INSERT INTO one_off_changes (name) VALUES ($1) ON CONFLICT DO NOTHING RETURNING name`, [name]);
+      if (mark.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return;
+      }
+      await client.query(`CREATE TABLE elo_bonus_2026_11_22_backup AS SELECT id, nickname, rating, peak, now() AS backed_up_at FROM users`);
+      const up = await client.query(`UPDATE users SET rating = rating + 30, peak = GREATEST(peak, rating + 30)`);
+      await client.query(`UPDATE one_off_changes SET detail = $2 WHERE name = $1`, [name, `${up.rowCount} users +30`]);
+      await client.query("COMMIT");
+      console.log(`one-off ${name}: ${up.rowCount} users +30 Elo (backup in elo_bonus_2026_11_22_backup)`);
+    } catch (e) {
+      await client.query("ROLLBACK").catch(() => {});
+      console.error(`one-off ${name} failed`, e);
+    } finally {
+      client.release();
+    }
   }
 
   async register({ nickname, firstName, lastName, avatar, password }: { nickname: string; firstName: string; lastName: string; avatar: Avatar; password: string }) {
