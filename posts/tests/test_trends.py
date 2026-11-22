@@ -55,3 +55,29 @@ def test_judge_verdicts(monkeypatch):
 def test_judge_without_a_key(monkeypatch):
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", None)
     assert trends.judge(v(1), [v(1)], {})[0] == "unchecked"
+
+
+def test_trend_download_tries_other_youtube_clients(monkeypatch, tmp_path):
+    from app.workers import render
+    tried = []
+
+    def fake_sh(cmd, **kw):
+        arg = next((a for a in cmd if a.startswith("youtube:player_client=")), "default")
+        tried.append(arg)
+        if arg != "youtube:player_client=tv":
+            raise RuntimeError("yt_dlp failed: ERROR: [youtube] x: Requested format is not available")
+    monkeypatch.setattr(render, "sh", fake_sh)
+    render.download_trend(tmp_path, "https://www.youtube.com/shorts/x", tmp_path / "clip.mp4")
+    assert tried == ["default", "youtube:player_client=tv"]
+
+
+def test_trend_download_reports_every_client(monkeypatch, tmp_path):
+    import pytest
+    from app.workers import render
+
+    def fail(cmd, **kw):
+        raise RuntimeError("Requested format is not available")
+    monkeypatch.setattr(render, "sh", fail)
+    with pytest.raises(RuntimeError) as e:
+        render.download_trend(tmp_path, "https://www.youtube.com/shorts/x", tmp_path / "clip.mp4")
+    assert "[default]" in str(e.value) and "[tv]" in str(e.value)

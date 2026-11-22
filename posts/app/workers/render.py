@@ -81,6 +81,27 @@ def ytdlp_trend_cmd(work: Path, *args: str, clients: str = "") -> list[str]:
     return cmd + list(args)
 
 
+# YouTube player clients tried in turn for a trending Short: signed in from a cloud IP, a client may list no
+# video formats at all ("Requested format is not available") while another one works
+TREND_CLIENTS = ("", "tv", "web_safari,mweb", "web_creator", "tv_simply")
+
+
+def download_trend(work: Path, url: str, src: Path):
+    errors = []
+    for clients in TREND_CLIENTS if "youtube.com" in url or "youtu.be" in url else ("",):
+        try:
+            # warnings stay on: a failure then says why (a missing JS runtime, expired cookies, ...)
+            sh(ytdlp_trend_cmd(work, "-q", "-S", "res:1920,fps", "-f", TREND_FORMAT, "--merge-output-format", "mp4",
+                               "-o", str(src), url, clients=clients), timeout=600)
+            if clients:
+                print(f"[render] {url}: downloaded with YouTube player_client={clients}", flush=True)
+            return
+        except RuntimeError as e:
+            errors.append(f"[{clients or 'default'}] {str(e)[-500:]}")
+            print(f"[render] {url}: yt-dlp ({clients or 'default'} clients) failed: {str(e)[-1500:]}", flush=True)
+    raise RuntimeError(" | ".join(errors)[-1800:])
+
+
 class Skip(Exception):
     pass
 
@@ -108,9 +129,7 @@ def build(c: dict, m: dict, work: Path, screen: str | None = None) -> dict:
     trend = (m.get("source") or "") in TREND_SOURCES
     if trend:
         # someone else's Short or Reel (the trends worker): its best vertical video + audio
-        # warnings stay on: a failure then says why (a missing JS runtime, expired cookies, ...)
-        sh(ytdlp_trend_cmd(work, "-q", "-S", "res:1920,fps", "-f", TREND_FORMAT, "--merge-output-format", "mp4",
-                           "-o", str(src), m["url"]), timeout=600)
+        download_trend(work, m["url"], src)
     else:
         sh([sys.executable, "-m", "yt_dlp", "--no-warnings", "-q", "-S", "res:1080,fps", "-f", SOURCE_FORMAT,
             "-o", str(src), m["url"]], timeout=600)
