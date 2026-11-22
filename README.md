@@ -77,6 +77,19 @@ WebSocket move: `bura {action}` where `action` is one of `lead {cards}`, `answer
 `topUp {cards}`, `bura`, `raise`, `approve {yes}`, `respond {answer: "accept"|"raise"|"fold"}`.
 The view (`game.kind = "bura"`) hides other hands and face-down cards.
 
+## Poker (no-limit Texas Hold'em cash table)
+
+Chosen with the project owner: a cash table with play chips, never rated.
+
+- 2 to 9 seats (host picks, default 6). Blinds 5/10, 10/20 (default), 25/50 or 50/100.
+- Everyone sits down with 100 big blinds. Out of chips: a free rebuy, dealt in from the next hand. Bots rebuy by themselves.
+- People can sit down at any time: a newcomer who opens the room link during a game takes a free seat, or a bot's seat (the bot stands up and its hand is folded), and is dealt in from the next hand. `stand` leaves the table (the hand is folded); they are not sat down again when they reconnect.
+- Standard no-limit betting: minimum bet one big blind, a raise is at least the last full raise, an all-in for less does not reopen the betting for players who already acted. Heads-up the button posts the small blind and acts first before the flop.
+- Side pots, uncalled bets returned, odd chips to the first winner left of the button. Hands are shown only at a showdown.
+- Not responding: the usual warning minute, then a bot checks or folds for the player; after two more minutes they lose the seat. No rating points are taken.
+- The host ends the session (`end`); the final view lists every player's net chips, including people who left (`ledger`). Nothing is written to match history.
+- Messages: `{ t: "poker", action: { t: "fold" | "check" | "call" } | { t: "raise", to } | { t: "rebuy" } }`, `{ t: "stand" }`, `{ t: "end" }`, plus `seat` / `addBot` / `removeSeat`, which also work during a poker game.
+
 ## Rating (Elo)
 
 Exactly the chess (FIDE) formula: expected score `E = 1 / (1 + 10^((Rb − Ra)/400))`, change
