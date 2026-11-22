@@ -20,19 +20,46 @@ import {
   visibleHand,
 } from "./engine";
 import { BuraAction, BuraState, applyBura, buraActor, buraAutoDelay, buraBot, buraView, newBura } from "./bura";
+import {
+  BIG_BLINDS,
+  DEFAULT_BIG_BLIND,
+  POKER_DEFAULT_SEATS,
+  POKER_MAX_SEATS,
+  POKER_MIN_SEATS,
+  PokerAction,
+  PokerState,
+  applyPoker,
+  newPoker,
+  pokerAutoDelay,
+  pokerBot,
+  pokerLeave,
+  pokerSit,
+  pokerView,
+} from "./poker";
 
 /** Which card game a room plays. */
-export type GameKind = "joker" | "bura";
+export type GameKind = "joker" | "bura" | "poker";
 
 /** Room settings: the Joker options plus which game is played. */
 export interface RoomConfig extends GameConfig {
   game: GameKind;
+  /** Poker: table size (2-9). */
+  seats?: number;
+  /** Poker: big blind (the small blind is half, the buy-in 100 big blinds). */
+  bb?: number;
 }
 
-type AnyGame = GameState | BuraState;
+type AnyGame = GameState | BuraState | PokerState;
 
 function isBuraGame(g: AnyGame | null | undefined): g is BuraState {
   return (g as BuraState | null)?.kind === "bura";
+}
+function isPokerGame(g: AnyGame | null | undefined): g is PokerState {
+  return (g as PokerState | null)?.kind === "poker";
+}
+
+function parseGame(v: unknown): GameKind | null {
+  return v === "bura" || v === "joker" || v === "poker" ? v : null;
 }
 
 /** One client connection. */
@@ -136,6 +163,10 @@ export interface RoomData {
   /** Rating changes of the last finished game, per seat. */
   ratingChanges?: (RatingChange | null)[] | null;
   matchId?: string | null;
+  /** Poker: players who stood up on purpose are not sat down again when they reconnect. */
+  standing?: string[];
+  /** Poker: chips won or lost by players who left the table this session. */
+  ledger?: { name: string; net: number }[];
 }
 
 type ClientMsg =
@@ -149,6 +180,9 @@ type ClientMsg =
   | { t: "bid"; bid: number }
   | { t: "play"; cardId: string; joker?: JokerMode }
   | { t: "bura"; action: BuraAction }
+  | { t: "poker"; action: PokerAction }
+  | { t: "stand" }
+  | { t: "end" }
   | { t: "chat"; text: string }
   | { t: "rtc"; to: string; data: unknown }
   | { t: "voice"; on: boolean }
@@ -157,7 +191,7 @@ type ClientMsg =
   | { t: "rematch" }
   | { t: "ping" };
 
-const BOT_NAMES = ["Bot Nino", "Bot Gio", "Bot Tamo", "Bot Luka"];
+const BOT_NAMES = ["Bot Nino", "Bot Gio", "Bot Tamo", "Bot Luka", "Bot Ana", "Bot Dato", "Bot Keti", "Bot Saba", "Bot Mari"];
 // BOT_DELAY_MS lets tests run whole games quickly (Node only).
 const envDelay = Number((globalThis as { process?: { env?: Record<string, string> } }).process?.env?.BOT_DELAY_MS);
 const BOT_DELAY = envDelay >= 0 ? envDelay : 750;
@@ -199,6 +233,8 @@ interface Person {
   /** Joined the voice chat. */
   voice: boolean;
   lastChat: number;
+  /** Name, account and rating, for sitting down during a poker game. */
+  profile?: Omit<Seat, "playerId">;
 }
 
 export class RoomCore {
@@ -221,8 +257,13 @@ export class RoomCore {
       lastActivity: Date.now(),
       hostId: null,
       status: "lobby",
-      seats: [null, null, null, null],
-      config: { ...DEFAULT_CONFIG, game, pairs: game === "bura" ? true : DEFAULT_CONFIG.pairs },
+      seats: Array(game === "poker" ? POKER_DEFAULT_SEATS : SEATS).fill(null),
+      config: {
+        ...DEFAULT_CONFIG,
+        game,
+        pairs: game === "bura" ? true : game === "poker" ? false : DEFAULT_CONFIG.pairs,
+        ...(game === "poker" ? { seats: POKER_DEFAULT_SEATS, bb: DEFAULT_BIG_BLIND } : {}),
+      },
       game: null,
       deadline: null,
       chat: [],
@@ -362,13 +403,22 @@ export class RoomCore {
     }
     ws.setPlayerId(playerId);
     const prev = this.people.get(playerId);
-    this.people.set(playerId, { name: profile.name, avatarUrl: profile.avatarUrl ?? null, voice: prev?.voice ?? false, lastChat: prev?.lastChat ?? 0 });
+    this.people.set(playerId, { name: profile.name, avatarUrl: profile.avatarUrl ?? null, voice: prev?.voice ?? false, lastChat: prev?.lastChat ?? 0, profile });
     let seat = this.seatOf(playerId);
     if (seat === null && d.status === "lobby") {
       const free = d.seats.findIndex((s) => s === null);
       if (free >= 0) {
         d.seats[free] = { playerId, ...profile };
         seat = free;
+      }
+    }
+    // Poker is a cash table: newcomers sit down mid-game, at a free seat or in a bot's place.
+    if (seat === null && d.status === "playing" && isPokerGame(d.game) && !d.standing?.includes(playerId)) {
+      let at = d.seats.findIndex((s) => s === null);
+      if (at < 0) at = d.seats.findIndex((s) => s !== null && s.playerId === null);
+      if (at >= 0) {
+        this.pokerSeat(at, { playerId, ...profile });
+        seat = at;
       }
     }
     if (seat !== null) Object.assign(d.seats[seat]!, profile);
@@ -383,7 +433,8 @@ export class RoomCore {
     for (const s of d.seats) if (s) s.afkKickAt = null;
     d.ratingChanges = null;
     d.matchId = null;
-    if (!this.host.rateGame || !d.game) return;
+    // Poker is played for play chips and is never rated.
+    if (!this.host.rateGame || !d.game || isPokerGame(d.game)) return;
     const g = d.game;
     // Bura: every player gets their team's match points; the rounds are the summary.
     const result = isBuraGame(g)
@@ -406,6 +457,68 @@ export class RoomCore {
     }
   }
 
+  /** Poker: put someone in a seat during the game (a bot sitting there stands up first). */
+  private pokerSeat(at: number, who: Seat): void {
+    const d = this.data!;
+    let g = d.game as PokerState;
+    if (d.seats[at]) {
+      this.recordLeave(at);
+      g = pokerLeave(g, at);
+    }
+    d.seats[at] = who;
+    d.game = pokerSit(g, at);
+    if (who.playerId) d.standing = (d.standing ?? []).filter((x) => x !== who.playerId);
+  }
+
+  /** Poker: someone leaves the table during the game. */
+  private pokerUnseat(at: number): void {
+    const d = this.data!;
+    if (!d.seats[at]) return;
+    this.recordLeave(at);
+    d.game = pokerLeave(d.game as PokerState, at);
+    d.seats[at] = null;
+  }
+
+  /** Remembers what a leaving player won or lost, for the end-of-session table. */
+  private recordLeave(at: number): void {
+    const d = this.data!;
+    const g = d.game as PokerState;
+    const s = d.seats[at];
+    if (!s || !g.seated[at]) return;
+    const net = g.stacks[at] - g.bought[at];
+    const ledger = (d.ledger ??= []);
+    const row = ledger.find((r) => r.name === s.name);
+    if (row) row.net += net;
+    else ledger.push({ name: s.name, net });
+    if (ledger.length > 40) ledger.shift();
+  }
+
+  /** Changes the number of seats in the lobby, keeping people and dropping bots first. */
+  private resizeSeats(n: number): void {
+    const d = this.data!;
+    if (d.seats.length === n) return;
+    const people = d.seats.filter((s) => s?.playerId).length;
+    if (people > n) throw new RuleError("Too many players for that table");
+    const next: (Seat | null)[] = Array(n).fill(null);
+    const overflow: Seat[] = [];
+    d.seats.forEach((s, i) => {
+      if (!s) return;
+      if (i < n) next[i] = s;
+      else overflow.push(s);
+    });
+    // Players who no longer fit move to a free seat, or into a bot's place.
+    for (const s of overflow.filter((x) => x.playerId)) {
+      let at = next.findIndex((x) => x === null);
+      if (at < 0) at = next.findIndex((x) => x !== null && x.playerId === null);
+      next[at] = s;
+    }
+    for (const s of overflow.filter((x) => !x.playerId)) {
+      const at = next.findIndex((x) => x === null);
+      if (at >= 0) next[at] = s;
+    }
+    d.seats = next;
+  }
+
   private requireHost(playerId: string): void {
     if (this.data!.hostId !== playerId) throw new RuleError("Only the host can do that");
   }
@@ -420,16 +533,33 @@ export class RoomCore {
         const mode = msg.config.mode === "nines" ? "nines" : msg.config.mode === "standard" ? "standard" : d.config.mode;
         const kh = Number(msg.config.khishti);
         const khishti = KHISHTI_OPTIONS.includes(kh) ? kh : d.config.khishti;
-        const game: GameKind = msg.config.game === "bura" ? "bura" : msg.config.game === "joker" ? "joker" : d.config.game ?? "joker";
-        // Bura is always played in pairs.
-        const pairs = game === "bura" ? true : typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
-        d.config = { mode, khishti, pairs, game };
+        const game: GameKind = parseGame(msg.config.game) ?? d.config.game ?? "joker";
+        // Bura is always played in pairs; poker never.
+        const pairs = game === "bura" ? true : game === "poker" ? false : typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
+        if (game === "poker") {
+          const want = Number(msg.config.seats ?? d.config.seats ?? POKER_DEFAULT_SEATS);
+          const seats = want >= POKER_MIN_SEATS && want <= POKER_MAX_SEATS ? Math.floor(want) : d.config.seats ?? POKER_DEFAULT_SEATS;
+          const bbWant = Number(msg.config.bb);
+          const bb = BIG_BLINDS.includes(bbWant) ? bbWant : d.config.bb ?? DEFAULT_BIG_BLIND;
+          this.resizeSeats(seats);
+          d.config = { mode, khishti, pairs, game, seats, bb };
+        } else {
+          this.resizeSeats(SEATS);
+          d.config = { mode, khishti, pairs, game };
+        }
         break;
       }
       case "seat": {
-        if (d.status !== "lobby") throw new RuleError("The game has started");
         const to = Number(msg.seat);
-        if (!(to >= 0 && to < SEATS) || d.seats[to]) throw new RuleError("That seat is taken");
+        if (d.status === "playing" && isPokerGame(d.game)) {
+          if (seat !== null) throw new RuleError("You already have a seat");
+          if (!(to >= 0 && to < d.seats.length) || d.seats[to]?.playerId) throw new RuleError("That seat is taken");
+          const person = this.people.get(playerId);
+          this.pokerSeat(to, { playerId, ...(person?.profile ?? { name: person?.name ?? "Player" }) });
+          break;
+        }
+        if (d.status !== "lobby") throw new RuleError("The game has started");
+        if (!(to >= 0 && to < d.seats.length) || d.seats[to]) throw new RuleError("That seat is taken");
         if (seat === null) throw new RuleError("You are watching this game");
         d.seats[to] = d.seats[seat];
         d.seats[seat] = null;
@@ -437,28 +567,56 @@ export class RoomCore {
       }
       case "addBot": {
         this.requireHost(playerId);
-        if (d.status !== "lobby") throw new RuleError("The game has started");
+        const pokerLive = d.status === "playing" && isPokerGame(d.game);
+        if (d.status !== "lobby" && !pokerLive) throw new RuleError("The game has started");
         const at = Number(msg.seat);
-        if (!(at >= 0 && at < SEATS) || d.seats[at]) throw new RuleError("That seat is taken");
-        d.seats[at] = { playerId: null, name: BOT_NAMES[at] };
+        if (!(at >= 0 && at < d.seats.length) || d.seats[at]) throw new RuleError("That seat is taken");
+        const bot = { playerId: null, name: BOT_NAMES[at] ?? `Bot ${at + 1}` };
+        if (pokerLive) this.pokerSeat(at, bot);
+        else d.seats[at] = bot;
         break;
       }
       case "removeSeat": {
         this.requireHost(playerId);
-        if (d.status !== "lobby") throw new RuleError("The game has started");
+        const pokerLive = d.status === "playing" && isPokerGame(d.game);
+        if (d.status !== "lobby" && !pokerLive) throw new RuleError("The game has started");
         const at = Number(msg.seat);
-        if (!(at >= 0 && at < SEATS) || !d.seats[at]) throw new RuleError("Seat is empty");
+        if (!(at >= 0 && at < d.seats.length) || !d.seats[at]) throw new RuleError("Seat is empty");
         if (d.seats[at]!.playerId === playerId) throw new RuleError("You can't remove yourself");
-        d.seats[at] = null;
+        const gone = d.seats[at]!.playerId;
+        if (pokerLive) {
+          this.pokerUnseat(at);
+          if (gone) d.standing = [...(d.standing ?? []).filter((x) => x !== gone), gone];
+        } else d.seats[at] = null;
+        break;
+      }
+      case "stand": {
+        if (d.status !== "playing" || !isPokerGame(d.game)) throw new RuleError("You can only stand up at a poker table");
+        if (seat === null) throw new RuleError("You are watching this game");
+        this.pokerUnseat(seat);
+        d.standing = [...(d.standing ?? []).filter((x) => x !== playerId), playerId];
+        break;
+      }
+      case "end": {
+        this.requireHost(playerId);
+        if (d.status !== "playing" || !isPokerGame(d.game)) throw new RuleError("No poker game in progress");
+        await this.finishGame();
         break;
       }
       case "start": {
         this.requireHost(playerId);
         if (d.status !== "lobby") throw new RuleError("The game has started");
-        for (let i = 0; i < SEATS; i++) if (!d.seats[i]) d.seats[i] = { playerId: null, name: BOT_NAMES[i] };
+        for (let i = 0; i < d.seats.length; i++) if (!d.seats[i]) d.seats[i] = { playerId: null, name: BOT_NAMES[i] ?? `Bot ${i + 1}` };
         const seed = Math.floor(Math.random() * 2 ** 31);
-        d.game = d.config.game === "bura" ? newBura(seed) : newGame(d.config, seed);
+        d.game =
+          d.config.game === "bura"
+            ? newBura(seed)
+            : d.config.game === "poker"
+              ? newPoker({ seats: d.seats.length, bb: d.config.bb, seated: d.seats.map(Boolean) }, seed)
+              : newGame(d.config, seed);
         d.status = "playing";
+        d.standing = [];
+        d.ledger = [];
         break;
       }
       case "rematch": {
@@ -495,7 +653,7 @@ export class RoomCore {
       case "play": {
         if (d.status !== "playing" || !d.game) throw new RuleError("No game in progress");
         if (seat === null) throw new RuleError("You are watching this game");
-        if (isBuraGame(d.game)) throw new RuleError("Unknown message");
+        if (isBuraGame(d.game) || isPokerGame(d.game)) throw new RuleError("Unknown message");
         this.comeBack(seat);
         const action: BotAction =
           msg.t === "trump"
@@ -516,6 +674,14 @@ export class RoomCore {
         if (d.game.phase === "gameOver") await this.finishGame();
         break;
       }
+      case "poker": {
+        if (d.status !== "playing" || !isPokerGame(d.game)) throw new RuleError("No game in progress");
+        if (seat === null) throw new RuleError("You are watching this game");
+        if (!msg.action || typeof msg.action !== "object" || msg.action.t === "next") throw new RuleError("Bad move");
+        this.comeBack(seat);
+        d.game = applyPoker(d.game, seat, msg.action);
+        break;
+      }
       default:
         throw new RuleError("Unknown message");
     }
@@ -528,6 +694,14 @@ export class RoomCore {
     const d = this.data!;
     const g = d.game;
     if (d.status !== "playing" || !g || g.phase === "gameOver") return null;
+    if (isPokerGame(g)) {
+      const auto = pokerAutoDelay(g);
+      if (auto !== null) return Date.now() + (envDelay >= 0 ? envDelay : auto);
+      if (g.phase !== "betting" || g.turn < 0) return null;
+      const ps = d.seats[g.turn];
+      if (!ps || ps.playerId === null || ps.afkKickAt) return Date.now() + BOT_DELAY;
+      return Date.now() + TURN_MS;
+    }
     if (isBuraGame(g)) {
       const auto = buraAutoDelay(g);
       if (auto !== null) return Date.now() + (envDelay >= 0 ? envDelay : auto);
@@ -563,7 +737,7 @@ export class RoomCore {
   private async goAfk(i: number): Promise<void> {
     const seat = this.data!.seats[i]!;
     seat.afkKickAt = Date.now() + KICK_MS;
-    const penalty = await this.penalize(seat, AFK_PENALTY, "afk");
+    const penalty = isPokerGame(this.data!.game) ? undefined : await this.penalize(seat, AFK_PENALTY, "afk");
     this.notice({ kind: "afk", name: seat.name, penalty });
   }
 
@@ -579,6 +753,14 @@ export class RoomCore {
   private async kick(i: number): Promise<void> {
     const d = this.data!;
     const seat = d.seats[i]!;
+    if (isPokerGame(d.game)) {
+      // Cash table: they just lose their seat (no rating at stake).
+      const gone = seat.playerId;
+      this.pokerUnseat(i);
+      if (gone) d.standing = [...(d.standing ?? []).filter((x) => x !== gone), gone];
+      this.notice({ kind: "kicked", name: seat.name });
+      return;
+    }
     const penalty = await this.penalize(seat, KICK_PENALTY, "abandoned");
     const gone = seat.playerId;
     d.seats[i] = { playerId: null, name: seat.name, avatarUrl: seat.avatarUrl, userId: null, rating: null, left: true };
@@ -604,6 +786,7 @@ export class RoomCore {
     const g = this.data!.game;
     if (!g) return "";
     if (isBuraGame(g)) return `${g.round}:${g.step}:${g.phase}:${g.turn}`;
+    if (isPokerGame(g)) return `${g.handNo}:${g.phase}:${g.street}:${g.turn}:${g.step}`;
     return `${g.dealsPlayed}:${g.phase}:${g.turn}:${g.trick.length}:${g.hands[g.turn]?.length ?? 0}`;
   }
 
@@ -633,7 +816,7 @@ export class RoomCore {
     if (d.status === "playing" && d.game) {
       const now = Date.now();
       let kicked = false;
-      for (let i = 0; i < SEATS; i++) {
+      for (let i = 0; i < d.seats.length; i++) {
         const at = d.seats[i]?.afkKickAt;
         if (at && now >= at - 50) {
           await this.kick(i);
@@ -646,6 +829,10 @@ export class RoomCore {
         return;
       }
       const g = d.game;
+      if (isPokerGame(g)) {
+        await this.pokerTimer(g, now);
+        return;
+      }
       if (isBuraGame(g) && buraActor(g) === null) {
         // Round result shown long enough: deal the next round.
         try {
@@ -689,6 +876,49 @@ export class RoomCore {
       return;
     }
     await this.host.setTimer(Date.now() + IDLE_CLEANUP_MS);
+  }
+
+  private async pokerTimer(g: PokerState, now: number): Promise<void> {
+    const d = this.data!;
+    if (g.phase === "handOver") {
+      // Bots buy back in by themselves; then the next hand is dealt.
+      let s = g;
+      d.seats.forEach((seat, i) => {
+        if (seat && seat.playerId === null && s.seated[i] && s.stacks[i] === 0) s = applyPoker(s, i, { t: "rebuy" });
+      });
+      d.game = applyPoker(s, -1, { t: "next" });
+      d.deadline = null;
+      await this.afterChange();
+      return;
+    }
+    if (g.phase !== "betting" || g.turn < 0) {
+      d.deadline = null;
+      await this.afterChange();
+      return;
+    }
+    const seat = g.turn;
+    const s = d.seats[seat];
+    if (s && s.playerId !== null && !s.afkKickAt) {
+      if (d.turnStage !== "warn") {
+        d.turnStage = "warn";
+        d.deadline = now + WARN_MS;
+        this.notice({ kind: "warn", name: s.name });
+        await this.save();
+        await this.host.setTimer(this.nextWake());
+        this.broadcast();
+        return;
+      }
+      await this.goAfk(seat);
+    }
+    try {
+      // A player who stopped responding only checks or folds; bots really play.
+      const passive = !!s && s.playerId !== null;
+      d.game = applyPoker(g, seat, pokerBot(g, seat, passive));
+    } catch (e) {
+      console.error("auto play failed", e);
+    }
+    d.deadline = null;
+    await this.afterChange();
   }
 
   // ---------- Views ----------
@@ -748,8 +978,11 @@ export class RoomCore {
             }
           : null,
       ),
+      ledger: d.ledger ?? [],
       game: isBuraGame(g)
         ? buraView(g, you)
+        : isPokerGame(g)
+        ? pokerView(g, you)
         : g
         ? {
             kind: "joker" as const,

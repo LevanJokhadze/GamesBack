@@ -196,7 +196,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (url.pathname === "/api/rooms" && req.method === "POST") {
     if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
     const body = await readJson(req, 4096).catch(() => ({}) as Record<string, unknown>);
-    const game = body.game === "bura" ? "bura" : "joker";
+    const game = body.game === "bura" || body.game === "poker" ? body.game : "joker";
     let code = "";
     do {
       code = Array.from({ length: 5 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join("");
