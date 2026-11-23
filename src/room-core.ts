@@ -187,6 +187,7 @@ type ClientMsg =
   | { t: "rtc"; to: string; data: unknown }
   | { t: "voice"; on: boolean }
   | { t: "talk"; on: boolean }
+  | { t: "pcm"; d: string }
   | { t: "back" }
   | { t: "rematch" }
   | { t: "ping" };
@@ -309,6 +310,7 @@ export class RoomCore {
       if (!playerId) return this.sendError(ws, "Say hello first");
       if (msg.t === "rtc") return this.relayRtc(playerId, msg, raw.length);
       if (msg.t === "talk") return this.relayTalk(playerId, Boolean(msg.on));
+      if (msg.t === "pcm") return this.relayPcm(playerId, msg.d);
       if (msg.t === "voice") {
         const p = this.people.get(playerId);
         if (p) p.voice = Boolean(msg.on);
@@ -353,6 +355,28 @@ export class RoomCore {
     for (const ws of this.host.connections()) {
       const id = ws.getPlayerId();
       if (id && id !== playerId) {
+        try {
+          ws.send(out);
+        } catch {
+          /* closed */
+        }
+      }
+    }
+  }
+
+  /**
+   * Voice audio through the server, for when a direct (WebRTC) link can't be made, e.g. two phones
+   * on mobile data with no TURN relay. A chunk is ~85 ms of 16 kHz mu-law audio, base64-encoded;
+   * it goes to everyone else who joined voice. The server never looks inside.
+   */
+  private relayPcm(playerId: string, d: unknown): void {
+    if (typeof d !== "string" || d.length > 3500) return;
+    const me = this.people.get(playerId);
+    if (!me?.voice) return;
+    const out = JSON.stringify({ t: "pcm", from: peerOf(playerId), d });
+    for (const ws of this.host.connections()) {
+      const id = ws.getPlayerId();
+      if (id && id !== playerId && this.people.get(id)?.voice) {
         try {
           ws.send(out);
         } catch {
