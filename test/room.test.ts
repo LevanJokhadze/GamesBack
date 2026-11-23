@@ -61,6 +61,20 @@ describe("room people, spectators, chat and voice relay", () => {
 
     await room.onMessage(a.c, JSON.stringify({ t: "talk", on: true }));
     expect(w.sent.at(-1)).toEqual({ t: "talk", peer: peerOf("u_a"), on: true });
+
+    // Audio through the server goes only to people in voice, and only from someone in voice.
+    const bBefore = b.sent.length;
+    const wBefore = w.sent.length;
+    await room.onMessage(a.c, JSON.stringify({ t: "pcm", d: "AAAA" }));
+    expect(b.sent.slice(bBefore)).toEqual([]); // b has not joined voice
+    await room.onMessage(b.c, JSON.stringify({ t: "voice", on: true }));
+    const b2 = b.sent.length;
+    await room.onMessage(a.c, JSON.stringify({ t: "pcm", d: "AAAA" }));
+    expect(b.sent.slice(b2)).toEqual([{ t: "pcm", from: peerOf("u_a"), d: "AAAA" }]);
+    expect(w.sent.slice(wBefore).some((m) => m.t === "pcm")).toBe(false);
+    const a2 = a.sent.length;
+    await room.onMessage(w.c, JSON.stringify({ t: "pcm", d: "AAAA" })); // w is not in voice
+    expect(a.sent.slice(a2).some((m) => m.t === "pcm")).toBe(false);
   });
 });
 
