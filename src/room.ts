@@ -2,7 +2,7 @@
 // Hibernation API. All game logic lives in RoomCore (room-core.ts).
 
 import { DurableObject } from "cloudflare:workers";
-import { Conn, RoomCore, RoomData } from "./room-core";
+import { Conn, RoomCore, RoomData, parseGame } from "./room-core";
 
 export interface Env {
   ROOMS: DurableObjectNamespace<Room>;
@@ -47,7 +47,7 @@ export class Room extends DurableObject<Env> {
     const url = new URL(request.url);
     if (url.pathname === "/init" && request.method === "POST") {
       const { code, game } = (await request.json()) as { code: string; game?: string };
-      if (!(await this.core.init(code, game === "bura" || game === "poker" ? game : "joker"))) return new Response("exists", { status: 409 });
+      if (!(await this.core.init(code, parseGame(game) ?? "joker"))) return new Response("exists", { status: 409 });
       return Response.json({ code });
     }
     if (url.pathname === "/info") {

@@ -36,9 +36,21 @@ import {
   pokerSit,
   pokerView,
 } from "./poker";
+import {
+  BgAction,
+  BgState,
+  DEFAULT_MATCH_LENGTH,
+  MATCH_LENGTHS,
+  applyBackgammon,
+  bgActor,
+  bgAutoDelay,
+  bgBot,
+  bgView,
+  newBackgammon,
+} from "./backgammon";
 
 /** Which card game a room plays. */
-export type GameKind = "joker" | "bura" | "poker";
+export type GameKind = "joker" | "bura" | "poker" | "backgammon";
 
 /** Room settings: the Joker options plus which game is played. */
 export interface RoomConfig extends GameConfig {
@@ -47,9 +59,11 @@ export interface RoomConfig extends GameConfig {
   seats?: number;
   /** Poker: big blind (the small blind is half, the buy-in 100 big blinds). */
   bb?: number;
+  /** Backgammon: match length in points. */
+  matchTo?: number;
 }
 
-type AnyGame = GameState | BuraState | PokerState;
+type AnyGame = GameState | BuraState | PokerState | BgState;
 
 function isBuraGame(g: AnyGame | null | undefined): g is BuraState {
   return (g as BuraState | null)?.kind === "bura";
@@ -58,8 +72,19 @@ function isPokerGame(g: AnyGame | null | undefined): g is PokerState {
   return (g as PokerState | null)?.kind === "poker";
 }
 
-function parseGame(v: unknown): GameKind | null {
-  return v === "bura" || v === "joker" || v === "poker" ? v : null;
+function isBgGame(g: AnyGame | null | undefined): g is BgState {
+  return (g as BgState | null)?.kind === "backgammon";
+}
+
+export function parseGame(v: unknown): GameKind | null {
+  return v === "bura" || v === "joker" || v === "poker" || v === "backgammon" ? v : null;
+}
+
+/** Seats at the table for each game. */
+function seatCount(game: GameKind, config?: { seats?: number }): number {
+  if (game === "poker") return config?.seats ?? POKER_DEFAULT_SEATS;
+  if (game === "backgammon") return 2;
+  return SEATS;
 }
 
 /** One client connection. */
@@ -181,6 +206,7 @@ type ClientMsg =
   | { t: "play"; cardId: string; joker?: JokerMode }
   | { t: "bura"; action: BuraAction }
   | { t: "poker"; action: PokerAction }
+  | { t: "bg"; action: BgAction }
   | { t: "stand" }
   | { t: "end" }
   | { t: "chat"; text: string }
@@ -258,12 +284,13 @@ export class RoomCore {
       lastActivity: Date.now(),
       hostId: null,
       status: "lobby",
-      seats: Array(game === "poker" ? POKER_DEFAULT_SEATS : SEATS).fill(null),
+      seats: Array(seatCount(game)).fill(null),
       config: {
         ...DEFAULT_CONFIG,
         game,
-        pairs: game === "bura" ? true : game === "poker" ? false : DEFAULT_CONFIG.pairs,
+        pairs: game === "bura" ? true : game === "poker" || game === "backgammon" ? false : DEFAULT_CONFIG.pairs,
         ...(game === "poker" ? { seats: POKER_DEFAULT_SEATS, bb: DEFAULT_BIG_BLIND } : {}),
+        ...(game === "backgammon" ? { matchTo: DEFAULT_MATCH_LENGTH } : {}),
       },
       game: null,
       deadline: null,
@@ -461,8 +488,11 @@ export class RoomCore {
     if (!this.host.rateGame || !d.game || isPokerGame(d.game)) return;
     const g = d.game;
     // Bura: every player gets their team's match points; the rounds are the summary.
+    // Backgammon: the match score; the games of the match are the summary.
     const result = isBuraGame(g)
       ? { mode: "bura", khishti: 0, pairs: true, totals: [0, 1, 2, 3].map((i) => g.match[i % 2]), pulkas: g.rounds as unknown[] }
+      : isBgGame(g)
+      ? { mode: "backgammon", khishti: 0, pairs: false, totals: g.score.slice(), pulkas: g.games as unknown[] }
       : { mode: d.config.mode, khishti: d.config.khishti, pairs: Boolean(d.config.pairs), totals: g.totals.slice(), pulkas: g.pulkas as unknown[] };
     try {
       const changes = await this.host.rateGame({
@@ -558,8 +588,8 @@ export class RoomCore {
         const kh = Number(msg.config.khishti);
         const khishti = KHISHTI_OPTIONS.includes(kh) ? kh : d.config.khishti;
         const game: GameKind = parseGame(msg.config.game) ?? d.config.game ?? "joker";
-        // Bura is always played in pairs; poker never.
-        const pairs = game === "bura" ? true : game === "poker" ? false : typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
+        // Bura is always played in pairs; poker and backgammon never.
+        const pairs = game === "bura" ? true : game === "poker" || game === "backgammon" ? false : typeof msg.config.pairs === "boolean" ? msg.config.pairs : d.config.pairs;
         if (game === "poker") {
           const want = Number(msg.config.seats ?? d.config.seats ?? POKER_DEFAULT_SEATS);
           const seats = want >= POKER_MIN_SEATS && want <= POKER_MAX_SEATS ? Math.floor(want) : d.config.seats ?? POKER_DEFAULT_SEATS;
@@ -567,6 +597,11 @@ export class RoomCore {
           const bb = BIG_BLINDS.includes(bbWant) ? bbWant : d.config.bb ?? DEFAULT_BIG_BLIND;
           this.resizeSeats(seats);
           d.config = { mode, khishti, pairs, game, seats, bb };
+        } else if (game === "backgammon") {
+          const want = Number(msg.config.matchTo);
+          const matchTo = MATCH_LENGTHS.includes(want) ? want : d.config.matchTo ?? DEFAULT_MATCH_LENGTH;
+          this.resizeSeats(2);
+          d.config = { mode, khishti, pairs, game, matchTo };
         } else {
           this.resizeSeats(SEATS);
           d.config = { mode, khishti, pairs, game };
@@ -637,7 +672,9 @@ export class RoomCore {
             ? newBura(seed)
             : d.config.game === "poker"
               ? newPoker({ seats: d.seats.length, bb: d.config.bb, seated: d.seats.map(Boolean) }, seed)
-              : newGame(d.config, seed);
+              : d.config.game === "backgammon"
+                ? newBackgammon({ matchTo: d.config.matchTo }, seed)
+                : newGame(d.config, seed);
         d.status = "playing";
         d.standing = [];
         d.ledger = [];
@@ -677,7 +714,7 @@ export class RoomCore {
       case "play": {
         if (d.status !== "playing" || !d.game) throw new RuleError("No game in progress");
         if (seat === null) throw new RuleError("You are watching this game");
-        if (isBuraGame(d.game) || isPokerGame(d.game)) throw new RuleError("Unknown message");
+        if (isBuraGame(d.game) || isPokerGame(d.game) || isBgGame(d.game)) throw new RuleError("Unknown message");
         this.comeBack(seat);
         const action: BotAction =
           msg.t === "trump"
@@ -706,6 +743,15 @@ export class RoomCore {
         d.game = applyPoker(d.game, seat, msg.action);
         break;
       }
+      case "bg": {
+        if (d.status !== "playing" || !isBgGame(d.game)) throw new RuleError("No game in progress");
+        if (seat === null) throw new RuleError("You are watching this game");
+        if (!msg.action || typeof msg.action !== "object" || msg.action.t === "auto") throw new RuleError("Bad move");
+        this.comeBack(seat);
+        d.game = applyBackgammon(d.game, seat, msg.action);
+        if (d.game.phase === "matchOver") await this.finishGame();
+        break;
+      }
       default:
         throw new RuleError("Unknown message");
     }
@@ -724,6 +770,16 @@ export class RoomCore {
       if (g.phase !== "betting" || g.turn < 0) return null;
       const ps = d.seats[g.turn];
       if (!ps || ps.playerId === null || ps.afkKickAt) return Date.now() + BOT_DELAY;
+      return Date.now() + TURN_MS;
+    }
+    if (isBgGame(g)) {
+      if (g.phase === "matchOver") return null;
+      const auto = bgAutoDelay(g);
+      if (auto !== null) return Date.now() + (envDelay >= 0 ? envDelay : auto);
+      const actor = bgActor(g);
+      if (actor === null) return null;
+      const bs = d.seats[actor];
+      if (!bs || bs.playerId === null || bs.afkKickAt) return Date.now() + BOT_DELAY;
       return Date.now() + TURN_MS;
     }
     if (isBuraGame(g)) {
@@ -811,6 +867,7 @@ export class RoomCore {
     if (!g) return "";
     if (isBuraGame(g)) return `${g.round}:${g.step}:${g.phase}:${g.turn}`;
     if (isPokerGame(g)) return `${g.handNo}:${g.phase}:${g.street}:${g.turn}:${g.step}`;
+    if (isBgGame(g)) return `${g.gameNo}:${g.phase}:${g.turn}:${g.step}`;
     return `${g.dealsPlayed}:${g.phase}:${g.turn}:${g.trick.length}:${g.hands[g.turn]?.length ?? 0}`;
   }
 
@@ -855,6 +912,10 @@ export class RoomCore {
       const g = d.game;
       if (isPokerGame(g)) {
         await this.pokerTimer(g, now);
+        return;
+      }
+      if (isBgGame(g)) {
+        await this.bgTimer(g, now);
         return;
       }
       if (isBuraGame(g) && buraActor(g) === null) {
@@ -945,6 +1006,48 @@ export class RoomCore {
     await this.afterChange();
   }
 
+  private async bgTimer(g: BgState, now: number): Promise<void> {
+    const d = this.data!;
+    if (bgAutoDelay(g) !== null) {
+      // Opening roll shown, a blocked turn, or the next game of the match.
+      try {
+        d.game = applyBackgammon(g, -1, { t: "auto" });
+      } catch (e) {
+        console.error("backgammon auto step failed", e);
+      }
+      d.deadline = null;
+      await this.afterChange();
+      return;
+    }
+    const seat = bgActor(g);
+    if (seat === null) {
+      d.deadline = null;
+      await this.afterChange();
+      return;
+    }
+    const s = d.seats[seat];
+    if (s && s.playerId !== null && !s.afkKickAt) {
+      if (d.turnStage !== "warn") {
+        d.turnStage = "warn";
+        d.deadline = now + WARN_MS;
+        this.notice({ kind: "warn", name: s.name });
+        await this.save();
+        await this.host.setTimer(this.nextWake());
+        this.broadcast();
+        return;
+      }
+      await this.goAfk(seat);
+    }
+    try {
+      d.game = applyBackgammon(g, seat, bgBot(g, seat));
+    } catch (e) {
+      console.error("auto play failed", e);
+    }
+    if (isBgGame(d.game) && d.game.phase === "matchOver") await this.finishGame();
+    d.deadline = null;
+    await this.afterChange();
+  }
+
   // ---------- Views ----------
 
   private broadcast(): void {
@@ -1007,6 +1110,8 @@ export class RoomCore {
         ? buraView(g, you)
         : isPokerGame(g)
         ? pokerView(g, you)
+        : isBgGame(g)
+        ? bgView(g, you)
         : g
         ? {
             kind: "joker" as const,

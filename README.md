@@ -90,6 +90,17 @@ Chosen with the project owner: a cash table with play chips, never rated.
 - The host ends the session (`end`); the final view lists every player's net chips, including people who left (`ledger`). Nothing is written to match history.
 - Messages: `{ t: "poker", action: { t: "fold" | "check" | "call" } | { t: "raise", to } | { t: "rebuy" } }`, `{ t: "stand" }`, `{ t: "end" }`, plus `seat` / `addBot` / `removeSeat`, which also work during a poker game.
 
+## Backgammon (2 players, match play)
+
+`POST /api/rooms { game: "backgammon" }`, or switch a lobby with `config { game: "backgammon", matchTo }`.
+
+- Standard rules: 15 checkers each, opening roll (one die each, higher moves first with both), doubles played four times, use as many dice as possible (the higher die if only one fits), hit blots go to the bar and must enter first, bearing off once all 15 are home (a higher die bears off from the highest point).
+- Doubling cube (no beavers, no Jacoby since this is match play). Single game = cube, gammon = 2 x cube, backgammon = 3 x cube. Crawford rule: no doubling in the game right after a player first reaches match length - 1.
+- Match length: 1, 3, 5, 7 or 11 points (default 5).
+- Rated like the other games (FIDE Elo, one game between two players; the bot counts as 1500). Not responding: same as Joker (warning, -5 and a bot plays, kicked after 2 more minutes).
+- An empty seat is filled by a bot at the start. Players move one checker at a time and can undo until they press done.
+- Messages: `{ t: "bg", action: { t: "roll" | "double" | "take" | "drop" | "undo" | "done" } | { t: "move", from: index | "bar", die } }`. Board indexes are from seat 0's side: index 0 is seat 0's 1-point; seat 0 moves down, seat 1 up.
+
 ## Rating (Elo)
 
 Exactly the chess (FIDE) formula: expected score `E = 1 / (1 + 10^((Rb − Ra)/400))`, change
