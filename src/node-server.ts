@@ -6,7 +6,7 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { randomInt } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
-import { Conn, RoomCore, UserInfo } from "./room-core";
+import { Conn, RoomCore, UserInfo, parseGame } from "./room-core";
 import { InputError, User, makeStore, parseAvatar } from "./store";
 import { Conflict, Forbidden, NotFound, Sheets } from "./offline";
 import { RuleError } from "./engine/game";
@@ -196,7 +196,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
   if (url.pathname === "/api/rooms" && req.method === "POST") {
     if (!originOk(req.headers.origin)) return send(req, res, 403, { error: "origin not allowed" });
     const body = await readJson(req, 4096).catch(() => ({}) as Record<string, unknown>);
-    const game = body.game === "bura" || body.game === "poker" ? body.game : "joker";
+    const game = parseGame(body.game) ?? "joker";
     let code = "";
     do {
       code = Array.from({ length: 5 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join("");

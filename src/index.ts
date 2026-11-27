@@ -1,5 +1,6 @@
 // Worker entry: small HTTP API plus WebSocket upgrade routed to the room's Durable Object.
 import { Env, Room } from "./room";
+import { parseGame } from "./room-core";
 
 export { Room };
 
@@ -48,7 +49,7 @@ export default {
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       if (!originAllowed(request, env)) return json({ error: "origin not allowed" }, 403);
       const body = (await request.json().catch(() => ({}))) as { game?: string };
-      const game = body?.game === "bura" || body?.game === "poker" ? body.game : "joker";
+      const game = parseGame(body?.game) ?? "joker";
       for (let attempt = 0; attempt < 6; attempt++) {
         const code = randomCode();
         const stub = env.ROOMS.get(env.ROOMS.idFromName(code));
